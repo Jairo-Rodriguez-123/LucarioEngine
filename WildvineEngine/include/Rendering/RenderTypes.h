@@ -40,6 +40,8 @@ LightType {
 	Spot
 };
 
+constexpr int kMaxSceneLights = 8;
+
 struct
 LightData {
 	LightType type = LightType::Directional;
@@ -74,7 +76,14 @@ CBPerFrame {
 	EU::Vector3 LightDir = EU::Vector3(0.0f, -1.0f, 0.0f);
 	float pad1 = 0.0f;
 	EU::Vector3 LightColor = EU::Vector3(1.0f, 1.0f, 1.0f);
-	float pad2 = 0.0f;
+	float LightRange = 10.0f;
+	EU::Vector3 LightPosition = EU::Vector3(0.0f, 3.0f, 0.0f);
+	int LightType = 0;
+  XMFLOAT4 LigthPositionsRanges[kMaxSceneLights]{};
+  XMFLOAT4 LigthColorsTypes[kMaxSceneLights]{};
+  XMFLOAT4 LightColorsIntensities[kMaxSceneLights]{};
+  int LightCount = 0;
+  XMFLOAT3 pad2 = XMFLOAT3(0.0f, 0.0f, 0.0f);
 };
 
 struct

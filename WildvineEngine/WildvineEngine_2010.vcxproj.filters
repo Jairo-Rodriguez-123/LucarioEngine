@@ -348,5 +348,8 @@
     <ClInclude Include="include\Rendering\RenderTypes.h">
       <Filter>include\Rendering</Filter>
     </ClInclude>
+    <ClInclude Include="include\Rendering\ISceneRenderer.h">
+      <Filter>include\Rendering</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
