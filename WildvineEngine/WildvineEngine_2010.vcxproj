@@ -494,6 +494,7 @@
     <ClInclude Include="include\EngineUtilities\Memory\TWeakPointer.h" />
     <ClInclude Include="include\EngineUtilities\Utilities\Camera.h" />
     <ClInclude Include="include\EngineUtilities\Utilities\EditorViewportPass.h" />
+    <ClInclude Include="include\Rendering\DeferredRenderer.h" />
     <ClInclude Include="include\Rendering\ForwardRenderer.h" />
     <ClInclude Include="include\Rendering\ISceneRenderer.h" />
     <ClInclude Include="include\Rendering\Material.h" />

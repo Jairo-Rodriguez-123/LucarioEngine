@@ -22,7 +22,9 @@ class SamplerState;
 class
 Material {
 public:
-	void setShader(ShaderProgram* shader) { m_shader = shader; }
+	void 
+	setShader(ShaderProgram* shader) { m_shader = shader; }
+
 	void setRasterizerState(RasterizerState* state) { m_rasterizerState = state; }
 	void setDepthStencilState(DepthStencilState* state) { m_depthStencilState = state; }
 	void setSamplerState(SamplerState* state) { m_samplerState = state; }
