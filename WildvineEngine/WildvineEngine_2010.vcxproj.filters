@@ -161,6 +161,9 @@
     <ClCompile Include="source\EditorViewportPass.cpp">
       <Filter>source</Filter>
     </ClCompile>
+    <ClCompile Include="source\Rendering\DefferredRenderer.cpp">
+      <Filter>source\Rendering</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="WildvineEngine.fx">

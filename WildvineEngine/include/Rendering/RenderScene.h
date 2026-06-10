@@ -1,34 +1,35 @@
-/**
- * @file RenderScene.h
- * @brief Declara la API de RenderScene dentro del subsistema Rendering.
- * @ingroup rendering
- */
 #pragma once
 #include "Prerequisites.h"
 #include "Rendering/RenderTypes.h"
 
 class Skybox;
 
-/**
- * @class RenderScene
- * @brief Contenedor temporal con los elementos visibles de un frame.
- *
- * `RenderScene` funciona como estructura intermedia entre el `SceneGraph` y el
- * renderer. Agrupa objetos por tipo de cola, luces direccionales y skybox activo.
- */
 class
 RenderScene {
 public:
-	/**
-	 * @brief Limpia todas las colecciones para preparar un nuevo frame.
-	 */
+
+	/*
+		*  @brief Clears all stored render objects, lights and resets the skybox pointer.
+	*/
 	void clear();
 
 public:
-	std::vector<RenderObject> opaqueObjects;       ///< Objetos opacos listos para renderizar.
-	std::vector<RenderObject> transparentObjects;  ///< Objetos transparentes ordenables por distancia.
-	std::vector<LightData> directionalLights;      ///< Luces direccionales activas en la escena.
-	Skybox* skybox = nullptr;                      ///< Skybox activo para el frame actual.
+	/*
+		*  @brief Container of opaque render objects. These are typically rendered first.
+	*/
+	std::vector<RenderObject> opaqueObjects;       
+	/*
+		*  @brief Container of transparent render objects. These are typically rendered after opaque objects.
+	*/
+	std::vector<RenderObject> transparentObjects;  
+	/*
+		*  @brief Collection of directional lights affecting the scene.
+	*/
+	std::vector<LightData> directionalLights;      
+	/*
+		*  @brief Pointer to the scene skybox. May be nullptr if no skybox is set.
+	*/
+	Skybox* skybox = nullptr;                      
 };
 
 

@@ -1,37 +1,46 @@
-/**
- * @file Mesh.h
- * @brief Declara la API de Mesh dentro del subsistema Rendering.
- * @ingroup rendering
- */
 #pragma once
 #include "Prerequisites.h"
 #include "Buffer.h"
 
-/**
- * @struct Submesh
- * @brief Describe una porcion renderizable de una malla con sus buffers asociados.
- */
+
 struct
 Submesh {
-	Buffer vertexBuffer;          ///< Buffer de vertices de la submalla.
-	Buffer indexBuffer;           ///< Buffer de indices de la submalla.
-	unsigned int indexCount = 0;  ///< Numero de indices a dibujar.
-	unsigned int startIndex = 0;  ///< Offset inicial dentro del index buffer.
-	unsigned int materialSlot = 0;///< Slot de material esperado por el renderer.
+	/*
+	 *  @brief Vertex buffer containing the vertex attributes for this submesh.
+	 */
+	Buffer vertexBuffer;          
+	/*
+	 *  @brief Index buffer containing the indices used to draw this submesh.
+	 */
+	Buffer indexBuffer;           
+	/*
+	 *  @brief Number of indices to draw for this submesh.
+	 */
+	unsigned int indexCount = 0;  
+	/*
+	 *  @brief Starting index within the index buffer for this submesh.
+	 */
+	unsigned int startIndex = 0;  
+	/*
+	 *  @brief Material slot index used to select the material for this submesh.
+	 */
+	unsigned int materialSlot = 0;
 };
 
-/**
- * @class Mesh
- * @brief Agrupa una coleccion de submallas listas para ser renderizadas.
- */
 class
 Mesh {
 public:
+	/*
+	 *  @brief Returns a modifiable reference to the vector of submeshes.
+	 */
 	std::vector<Submesh>& getSubmeshes() { return m_submeshes; }
+	/*
+	 *  @brief Returns a const reference to the vector of submeshes.
+	 */
 	const std::vector<Submesh>& getSubmeshes() const { return m_submeshes; }
 
-	/**
-	 * @brief Libera todos los buffers asociados a las submallas.
+	/*
+	 *  @brief Destroys GPU resources (buffers) for all submeshes and clears the list.
 	 */
 	void
 	destroy() {
@@ -43,6 +52,9 @@ public:
 	}
 
 private:
+	/*
+	 *  @brief Container holding all submeshes for this mesh.
+	 */
 	std::vector<Submesh> m_submeshes;
 };
 
