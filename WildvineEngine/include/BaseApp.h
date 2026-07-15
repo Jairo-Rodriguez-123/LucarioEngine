@@ -30,7 +30,7 @@
 #include "Rendering/Material.h"
 #include "Rendering/MaterialInstance.h"
 #include "Rendering/Mesh.h"
-#include "Rendering/ForwardRenderer.h"
+#include "Rendering/RenderPipeline.h"
 #include "Rendering/RenderScene.h"
 #include <string>
 extern IMGUI_IMPL_API
@@ -44,8 +44,8 @@ LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARA
  * la escena de prueba y el pipeline de render. Tambien administra el bucle principal
  * de actualizacion, la serializacion basica de escena y la respuesta a cambios de tamano.
  */
-class 
-BaseApp {
+class
+	BaseApp {
 public:
 	BaseApp() = default;
 	~BaseApp() { destroy(); }
@@ -55,7 +55,7 @@ public:
 	 * @return `S_OK` si la aplicacion queda lista para continuar la inicializacion.
 	 */
 	HRESULT
-	awake();
+		awake();
 
 	/**
 	 * @brief Ejecuta el bucle principal de la aplicacion.
@@ -63,42 +63,42 @@ public:
 	 * @param nCmdShow Modo inicial de visualizacion de la ventana.
 	 * @return Codigo de salida del proceso.
 	 */
-	int 
-	run(HINSTANCE hInst, int nCmdShow);
-	
+	int
+		run(HINSTANCE hInst, int nCmdShow);
+
 	/**
 	 * @brief Inicializa recursos graficos, escena, materiales y renderer.
 	 * @return `S_OK` cuando todos los recursos base quedan listos.
 	 */
 	HRESULT
-	init();
+		init();
 
 	/**
 	 * @brief Ejecuta la logica por frame y sincroniza GUI, camara y escena.
 	 * @param deltaTime Tiempo transcurrido desde el frame anterior.
 	 */
-	void 
-	update(float deltaTime);
+	void
+		update(float deltaTime);
 
 	/**
 	 * @brief Emite el frame actual en el viewport del editor y en el back buffer final.
 	 */
-	void 
-	render();
+	void
+		render();
 
 	/**
 	 * @brief Libera recursos del motor en orden seguro de destruccion.
 	 */
-	void 
-	destroy();
+	void
+		destroy();
 
 	/**
 	 * @brief Reconstuye recursos dependientes de la resolucion principal.
 	 * @param newW Nuevo ancho del area cliente.
 	 * @param newH Nuevo alto del area cliente.
 	 */
-	void 
-	onResize(unsigned int newW, unsigned int newH);
+	void
+		onResize(unsigned int newW, unsigned int newH);
 
 	/**
 	 * @brief Atiende cambios diferidos del viewport interno del editor.
@@ -124,8 +124,10 @@ public:
 	 */
 	std::string getDefaultScenePath() const;
 private:
-	static LRESULT CALLBACK 
-	WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+	EU::TSharedPointer<Actor> createLightActor(const std::string& name = std::string());
+
+	static LRESULT CALLBACK
+		WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 
 
 private:
@@ -157,6 +159,17 @@ private:
 	Texture m_drakefireMetallicSRV;
 	Texture m_drakefireRoughnessSRV;
 	Texture m_drakefireAOSRV;
+	Texture m_toadAlbedoSRV;
+	Texture m_toadNormalSRV;
+	Texture m_toadMetallicSRV;
+	Texture m_toadRoughnessSRV;
+	Texture m_toadAOSRV;
+	Texture m_toadGlassAlbedoSRV;
+	Texture m_toadGlassNormalSRV;
+	Texture m_toadGlassRoughnessSRV;
+	Texture m_toadHeadAlbedoSRV;
+	Texture m_toadHeadNormalSRV;
+	Texture m_toadHeadRoughnessSRV;
 
 	Camera															m_camera;
 
@@ -164,11 +177,13 @@ private:
 	std::vector<EU::TSharedPointer<Actor>> m_actors;
 	EU::TSharedPointer<Actor> m_cyberGun;
 	EU::TSharedPointer<Actor> m_drakefirePistol;
+	EU::TSharedPointer<Actor> m_sciFiToad;
 	EU::TSharedPointer<Actor> m_directionalLightActor;
 
-	
-	Model3D*														m_model;
-	Model3D*														m_drakefireModel = nullptr;
+
+	Model3D* m_model = nullptr;
+	Model3D* m_drakefireModel = nullptr;
+	Model3D* m_toadModel = nullptr;
 
 	//CBChangeOnResize										cbChangesOnResize;
 	//CBNeverChanges											cbNeverChanges;
@@ -178,18 +193,28 @@ private:
 
 	Skybox m_skybox;
 	Texture															m_skyboxTex;
+	Texture m_lightIconTexture;
 	RasterizerState m_defaultRasterizer;
 	DepthStencilState m_defaultDepthStencil;
 	SamplerState m_defaultSampler;
 	Mesh m_cyberGunRenderMesh;
 	Mesh m_drakefireRenderMesh;
+	Mesh m_toadRenderMesh;
 	Material m_pbrMaterial;
 	Material m_transparentPbrMaterial;
+	Material m_cyberGunPbrMaterial;
+	Material m_drakefirePbrMaterial;
+	Material m_toadPbrMaterial;
+	Material m_toadGlassPbrMaterial;
+	Material m_toadHeadPbrMaterial;
 	MaterialInstance m_cyberGunMaterial;
 	MaterialInstance m_drakefireMaterial;
+	MaterialInstance m_toadMaterial;
+	MaterialInstance m_toadGlassMaterial;
+	MaterialInstance m_toadHeadMaterial;
 
 	EditorViewportPass m_editorViewportPass;
-	ForwardRenderer m_forwardRenderer;
+	RenderPipeline m_renderPipeline;
 	RenderScene m_renderScene;
 	bool m_editorViewportResizePending = false;
 	unsigned int m_pendingViewportWidth = 1;
@@ -199,6 +224,5 @@ private:
 	unsigned int m_lastRequestedViewportHeight = 1;
 	int m_viewportResizeStableFrames = 0;
 };
-
 
 

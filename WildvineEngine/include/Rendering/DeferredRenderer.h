@@ -71,9 +71,6 @@ public:
 	void
 		setDeferredDebugViewMode(int mode) override { m_deferredDebugViewMode = mode; }
 
-	void
-		setEditorGizmosVisible(bool visible) override { m_editorGizmosVisible = visible; }
-
 	const char*
 		getDebugName() const override { return "DeferredRenderer"; }
 
@@ -81,7 +78,7 @@ private:
 	void buildQueues(RenderScene& scene, const Camera& camera);
 	void updatePerFrame(const Camera& camera, const RenderScene& scene, DeviceContext& deviceContext);
 	void updateLightMatrices(const Camera& camera, const RenderScene& scene);
-	void renderSceneToTarget(DeviceContext& deviceContext, const Camera& camera, RenderScene& scene, EditorViewportPass& targetPass, bool applyShadows);
+	void renderSceneToTarget(DeviceContext& deviceContext, RenderScene& scene, EditorViewportPass& targetPass, bool applyShadows);
 	void bindGBufferTargets(DeviceContext& deviceContext, ID3D11DepthStencilView* depthStencilView);
 	void bindFinalTarget(DeviceContext& deviceContext, ID3D11RenderTargetView* renderTargetView, ID3D11DepthStencilView* depthStencilView);
 	void clearDeferredSRVs(DeviceContext& deviceContext);
@@ -90,7 +87,6 @@ private:
 	void renderLightingPass(DeviceContext& deviceContext);
 	void renderSkyboxPass(DeviceContext& deviceContext, RenderScene& scene);
 	void renderTransparentPass(DeviceContext& deviceContext);
-	void renderLightGizmoPass(DeviceContext& deviceContext, const Camera& camera, const RenderScene& scene);
 	void renderForwardObject(DeviceContext& deviceContext, const RenderObject& object, RenderPassType passType);
 	void renderShadowPass(DeviceContext& deviceContext);
 	void renderShadowObject(DeviceContext& deviceContext, const RenderObject& object);
@@ -104,23 +100,21 @@ private:
 		Texture& srv,
 		RenderTargetView& rtv);
 	HRESULT createLightingResources(Device& device);
-	HRESULT createLightGizmoResources(Device& device);
 	HRESULT createFullScreenQuad(Device& device);
 	HRESULT createBlendStates(Device& device);
 	ID3D11BlendState* resolveBlendState(const Material* material) const;
 
+private:
 	Buffer m_perFrameBuffer;
 	Buffer m_perObjectBuffer;
 	Buffer m_perMaterialBuffer;
 	Buffer m_lightingDebugBuffer;
-	Buffer m_lightGizmoConstantBuffer;
 	Buffer m_fullscreenVertexBuffer;
 	Buffer m_fullscreenIndexBuffer;
 
 	DepthStencilState m_transparentDepthStencil;
 	DepthStencilState m_disabledDepthStencil;
 	DepthStencilState m_shadowDepthStencil;
-	DepthStencilState m_lightGizmoDepthStencil;
 
 	ID3D11BlendState* m_alphaBlendState = nullptr;
 	ID3D11BlendState* m_opaqueBlendState = nullptr;
@@ -137,12 +131,8 @@ private:
 
 	ShaderProgram m_gBufferShader;
 	ShaderProgram m_deferredLightingShader;
-	ShaderProgram m_lightGizmoShader;
 	SamplerState m_lightingSampler;
 	RasterizerState m_fullscreenRasterizer;
-	RasterizerState m_lightGizmoRasterizer;
-	ID3D11Buffer* m_lightGizmoVertexBuffer = nullptr;
-	unsigned int m_lightGizmoVertexCapacity = 0;
 
 	Texture m_gBufferAlbedoMetallicTexture;
 	Texture m_gBufferAlbedoMetallicSRV;
@@ -176,7 +166,6 @@ private:
 	} m_lightingDebugData{};
 	bool m_shadowFactorDebugEnabled = false;
 	int m_deferredDebugViewMode = 0;
-	bool m_editorGizmosVisible = true;
 
 	std::vector<const RenderObject*> m_opaqueQueue;
 	std::vector<const RenderObject*> m_transparentQueue;

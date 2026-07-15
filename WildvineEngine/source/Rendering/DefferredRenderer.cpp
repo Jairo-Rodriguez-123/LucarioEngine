@@ -6,7 +6,6 @@
 #include "Rendering/DeferredRenderer.h"
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include "Device.h"
 #include "DeviceContext.h"
 #include "EngineUtilities/Utilities/Camera.h"
@@ -18,9 +17,6 @@
 
 namespace {
 	constexpr unsigned int kGBufferTargetCount = 4;
-	constexpr unsigned int kLightGizmoVertexCapacity = 8192;
-	constexpr int kLightGizmoRingSegments = 96;
-	constexpr float kTwoPi = 6.28318530718f;
 
 	struct RenderTargetViewAccess {
 		ID3D11RenderTargetView* m_renderTargetView = nullptr;
@@ -34,15 +30,6 @@ namespace {
 		DepthStencilView m_dsv;
 		unsigned int m_width = 1;
 		unsigned int m_height = 1;
-	};
-
-	struct LightGizmoVertex {
-		EU::Vector3 position;
-		XMFLOAT4 color;
-	};
-
-	struct LightGizmoConstants {
-		XMFLOAT4X4 ViewProjection{};
 	};
 
 	ID3D11RenderTargetView* ResolveViewportRTV(EditorViewportPass& pass) {
@@ -74,176 +61,11 @@ namespace {
 
 	void
 		writeLightToFrameBuffer(CBPerFrame& buffer, int lightIndex, const LightData& light) {
-		const float range = ResolveLightRange(light);
+		const float range = light.range > 0.0f ? light.range : 10.0f;
 		const EU::Vector3 lightColor = light.color * light.intensity;
-		const float spotHalfAngle = XMConvertToRadians(ResolveSpotAngleDegrees(light)) * 0.5f;
-		const float spotOuterCos = static_cast<float>(std::cos(spotHalfAngle));
-		const float spotInnerCos = static_cast<float>(std::cos(spotHalfAngle * 0.85f));
-		const EU::Vector2 rectSize = ResolveRectLightSize(light);
 		buffer.LightPositionsRanges[lightIndex] = XMFLOAT4(light.position.x, light.position.y, light.position.z, range);
 		buffer.LightColorsTypes[lightIndex] = XMFLOAT4(lightColor.x, lightColor.y, lightColor.z, static_cast<float>(static_cast<int>(light.type)));
 		buffer.LightDirectionsIntensities[lightIndex] = XMFLOAT4(light.direction.x, light.direction.y, light.direction.z, light.intensity);
-		buffer.LightSpotRectParams[lightIndex] = XMFLOAT4(spotOuterCos, spotInnerCos, rectSize.x, rectSize.y);
-	}
-
-	float clamp01(float value) {
-		if (value < 0.0f) {
-			return 0.0f;
-		}
-		return value > 1.0f ? 1.0f : value;
-	}
-
-	XMFLOAT4 lightGizmoColor(const LightData& light, float alpha) {
-		const float energy = CalculatePointLightEnergy(light);
-		if (energy <= 0.0f) {
-			return XMFLOAT4(1.0f, 0.84f, 0.36f, alpha);
-		}
-
-		return XMFLOAT4(clamp01(light.color.x), clamp01(light.color.y), clamp01(light.color.z), alpha);
-	}
-
-	XMVECTOR vectorFromLightPosition(const LightData& light) {
-		return XMVectorSet(light.position.x, light.position.y, light.position.z, 1.0f);
-	}
-
-	XMVECTOR vectorFromLightDirection(const LightData& light) {
-		XMVECTOR direction = XMVectorSet(light.direction.x, light.direction.y, light.direction.z, 0.0f);
-		if (XMVectorGetX(XMVector3LengthSq(direction)) <= 0.000001f) {
-			return XMVectorSet(0.0f, -1.0f, 0.0f, 0.0f);
-		}
-		return XMVector3Normalize(direction);
-	}
-
-	EU::Vector3 toVector3(XMVECTOR value) {
-		return EU::Vector3(XMVectorGetX(value), XMVectorGetY(value), XMVectorGetZ(value));
-	}
-
-	void addDebugLine(std::vector<LightGizmoVertex>& vertices,
-		XMVECTOR start,
-		XMVECTOR end,
-		const XMFLOAT4& color)
-	{
-		LightGizmoVertex startVertex{};
-		startVertex.position = toVector3(start);
-		startVertex.color = color;
-
-		LightGizmoVertex endVertex{};
-		endVertex.position = toVector3(end);
-		endVertex.color = color;
-
-		vertices.push_back(startVertex);
-		vertices.push_back(endVertex);
-	}
-
-	void buildLightBasis(XMVECTOR direction, XMVECTOR& right, XMVECTOR& up) {
-		if (XMVectorGetX(XMVector3LengthSq(direction)) <= 0.000001f) {
-			direction = XMVectorSet(0.0f, -1.0f, 0.0f, 0.0f);
-		}
-		else {
-			direction = XMVector3Normalize(direction);
-		}
-
-		XMVECTOR referenceUp = std::fabs(XMVectorGetY(direction)) > 0.92f
-			? XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f)
-			: XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-		right = XMVector3Normalize(XMVector3Cross(referenceUp, direction));
-		up = XMVector3Normalize(XMVector3Cross(direction, right));
-	}
-
-	void addBasisRing(std::vector<LightGizmoVertex>& vertices,
-		XMVECTOR center,
-		XMVECTOR right,
-		XMVECTOR up,
-		float radius,
-		const XMFLOAT4& color)
-	{
-		for (int segment = 0; segment < kLightGizmoRingSegments; ++segment) {
-			const float angle0 = (static_cast<float>(segment) / static_cast<float>(kLightGizmoRingSegments)) * kTwoPi;
-			const float angle1 = (static_cast<float>(segment + 1) / static_cast<float>(kLightGizmoRingSegments)) * kTwoPi;
-			XMVECTOR point0 = XMVectorAdd(center, XMVectorAdd(
-				XMVectorScale(right, std::cos(angle0) * radius),
-				XMVectorScale(up, std::sin(angle0) * radius)));
-			XMVECTOR point1 = XMVectorAdd(center, XMVectorAdd(
-				XMVectorScale(right, std::cos(angle1) * radius),
-				XMVectorScale(up, std::sin(angle1) * radius)));
-			addDebugLine(vertices, point0, point1, color);
-		}
-	}
-
-	void addPointLightGizmo(std::vector<LightGizmoVertex>& vertices, const LightData& light) {
-		const float radius = CalculatePointLightInfluenceRadius(light);
-		if (radius <= 0.0f) {
-			return;
-		}
-
-		const XMFLOAT4 color = lightGizmoColor(light, 0.58f);
-		const XMVECTOR center = vectorFromLightPosition(light);
-		addBasisRing(vertices, center, XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f), radius, color);
-		addBasisRing(vertices, center, XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f), radius, color);
-		addBasisRing(vertices, center, XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f), XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f), radius, color);
-	}
-
-	void addSpotLightGizmo(std::vector<LightGizmoVertex>& vertices, const LightData& light) {
-		const float range = CalculateLocalLightInfluenceRadius(light);
-		if (range <= 0.0f) {
-			return;
-		}
-
-		const XMFLOAT4 color = lightGizmoColor(light, 0.68f);
-		const XMVECTOR center = vectorFromLightPosition(light);
-		const XMVECTOR direction = vectorFromLightDirection(light);
-		XMVECTOR right;
-		XMVECTOR up;
-		buildLightBasis(direction, right, up);
-
-		const float halfAngle = XMConvertToRadians(ResolveSpotAngleDegrees(light)) * 0.5f;
-		const float baseRadius = static_cast<float>(std::tan(halfAngle)) * range;
-		const XMVECTOR baseCenter = XMVectorAdd(center, XMVectorScale(direction, range));
-		addBasisRing(vertices, baseCenter, right, up, baseRadius, color);
-		addDebugLine(vertices, center, XMVectorAdd(baseCenter, XMVectorScale(right, baseRadius)), color);
-		addDebugLine(vertices, center, XMVectorAdd(baseCenter, XMVectorScale(right, -baseRadius)), color);
-		addDebugLine(vertices, center, XMVectorAdd(baseCenter, XMVectorScale(up, baseRadius)), color);
-		addDebugLine(vertices, center, XMVectorAdd(baseCenter, XMVectorScale(up, -baseRadius)), color);
-	}
-
-	void addRectLightGizmo(std::vector<LightGizmoVertex>& vertices, const LightData& light) {
-		const XMFLOAT4 color = lightGizmoColor(light, 0.68f);
-		const XMFLOAT4 rangeColor = lightGizmoColor(light, 0.36f);
-		const XMVECTOR center = vectorFromLightPosition(light);
-		const XMVECTOR direction = vectorFromLightDirection(light);
-		XMVECTOR right;
-		XMVECTOR up;
-		buildLightBasis(direction, right, up);
-
-		const EU::Vector2 size = ResolveRectLightSize(light);
-		const float halfWidth = size.x * 0.5f;
-		const float halfHeight = size.y * 0.5f;
-		XMVECTOR corners[4] = {
-			XMVectorAdd(center, XMVectorAdd(XMVectorScale(right, -halfWidth), XMVectorScale(up, -halfHeight))),
-			XMVectorAdd(center, XMVectorAdd(XMVectorScale(right, halfWidth), XMVectorScale(up, -halfHeight))),
-			XMVectorAdd(center, XMVectorAdd(XMVectorScale(right, halfWidth), XMVectorScale(up, halfHeight))),
-			XMVectorAdd(center, XMVectorAdd(XMVectorScale(right, -halfWidth), XMVectorScale(up, halfHeight)))
-		};
-		for (int i = 0; i < 4; ++i) {
-			addDebugLine(vertices, corners[i], corners[(i + 1) % 4], color);
-		}
-
-		const float range = CalculateLocalLightInfluenceRadius(light);
-		if (range <= 0.0f) {
-			return;
-		}
-
-		const XMVECTOR farCenter = XMVectorAdd(center, XMVectorScale(direction, range));
-		XMVECTOR farCorners[4] = {
-			XMVectorAdd(farCenter, XMVectorAdd(XMVectorScale(right, -halfWidth), XMVectorScale(up, -halfHeight))),
-			XMVectorAdd(farCenter, XMVectorAdd(XMVectorScale(right, halfWidth), XMVectorScale(up, -halfHeight))),
-			XMVectorAdd(farCenter, XMVectorAdd(XMVectorScale(right, halfWidth), XMVectorScale(up, halfHeight))),
-			XMVectorAdd(farCenter, XMVectorAdd(XMVectorScale(right, -halfWidth), XMVectorScale(up, halfHeight)))
-		};
-		for (int i = 0; i < 4; ++i) {
-			addDebugLine(vertices, farCorners[i], farCorners[(i + 1) % 4], rangeColor);
-			addDebugLine(vertices, corners[i], farCorners[i], rangeColor);
-		}
 	}
 }
 
@@ -313,11 +135,6 @@ DeferredRenderer::init(Device& device) {
 		return hr;
 	}
 
-	hr = createLightGizmoResources(device);
-	if (FAILED(hr)) {
-		return hr;
-	}
-
 	hr = createFullScreenQuad(device);
 	if (FAILED(hr)) {
 		return hr;
@@ -350,9 +167,9 @@ DeferredRenderer::render(DeviceContext& deviceContext,
 	buildQueues(scene, camera);
 	updatePerFrame(camera, scene, deviceContext);
 
-	renderSceneToTarget(deviceContext, camera, scene, m_preShadowDebugPass, false);
+	renderSceneToTarget(deviceContext, scene, m_preShadowDebugPass, false);
 	renderShadowPass(deviceContext);
-	renderSceneToTarget(deviceContext, camera, scene, viewportPass, true);
+	renderSceneToTarget(deviceContext, scene, viewportPass, true);
 }
 
 void
@@ -385,22 +202,16 @@ DeferredRenderer::destroy() {
 	m_lightingSampler.destroy();
 	m_deferredLightingShader.destroy();
 	m_gBufferShader.destroy();
-	m_lightGizmoShader.destroy();
 
-	m_lightGizmoDepthStencil.destroy();
 	m_transparentDepthStencil.destroy();
 	m_disabledDepthStencil.destroy();
 	m_shadowDepthStencil.destroy();
-	m_lightGizmoConstantBuffer.destroy();
 	m_perMaterialBuffer.destroy();
 	m_lightingDebugBuffer.destroy();
 	m_perObjectBuffer.destroy();
 	m_perFrameBuffer.destroy();
-	SAFE_RELEASE(m_lightGizmoVertexBuffer);
-	m_lightGizmoVertexCapacity = 0;
 
 	m_shadowRasterizer.destroy();
-	m_lightGizmoRasterizer.destroy();
 	m_shadowShader.destroy();
 	m_shadowDSV.destroy();
 	m_shadowDepthSRV.destroy();
@@ -454,7 +265,6 @@ DeferredRenderer::updatePerFrame(const Camera& camera,
 		m_cbPerFrame.LightPositionsRanges[lightIndex] = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
 		m_cbPerFrame.LightColorsTypes[lightIndex] = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
 		m_cbPerFrame.LightDirectionsIntensities[lightIndex] = XMFLOAT4(0.0f, -1.0f, 0.0f, 0.0f);
-		m_cbPerFrame.LightSpotRectParams[lightIndex] = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
 	}
 
 	if (!scene.directionalLights.empty()) {
@@ -475,7 +285,7 @@ DeferredRenderer::updatePerFrame(const Camera& camera,
 		m_cbPerFrame.LightDir = mainLight.direction;
 		m_cbPerFrame.LightColor = mainLight.color * mainLight.intensity;
 		m_cbPerFrame.LightPosition = mainLight.position;
-		m_cbPerFrame.LightRange = ResolveLightRange(mainLight);
+		m_cbPerFrame.LightRange = mainLight.range > 0.0f ? mainLight.range : 10.0f;
 		m_cbPerFrame.LightType = static_cast<int>(mainLight.type);
 	}
 
@@ -506,7 +316,6 @@ DeferredRenderer::updateLightMatrices(const Camera& camera, const RenderScene& s
 
 void
 DeferredRenderer::renderSceneToTarget(DeviceContext& deviceContext,
-	const Camera& camera,
 	RenderScene& scene,
 	EditorViewportPass& targetPass,
 	bool applyShadows) {
@@ -523,7 +332,6 @@ DeferredRenderer::renderSceneToTarget(DeviceContext& deviceContext,
 	renderLightingPass(deviceContext);
 	renderSkyboxPass(deviceContext, scene);
 	renderTransparentPass(deviceContext);
-	renderLightGizmoPass(deviceContext, camera, scene);
 }
 
 void
@@ -709,77 +517,6 @@ DeferredRenderer::renderTransparentPass(DeviceContext& deviceContext) {
 		renderForwardObject(deviceContext, *object, RenderPassType::Transparent);
 	}
 
-	deviceContext.OMSetBlendState(m_opaqueBlendState, m_blendFactor, 0xffffffff);
-}
-
-void
-DeferredRenderer::renderLightGizmoPass(DeviceContext& deviceContext, const Camera& camera, const RenderScene& scene) {
-	if (!m_editorGizmosVisible ||
-		!m_lightGizmoVertexBuffer ||
-		!m_lightGizmoShader.m_VertexShader ||
-		scene.directionalLights.empty()) {
-		return;
-	}
-
-	std::vector<LightGizmoVertex> vertices;
-	vertices.reserve(kLightGizmoVertexCapacity);
-	for (const LightData& light : scene.directionalLights) {
-		if (vertices.size() + static_cast<size_t>(kLightGizmoRingSegments * 6) >= kLightGizmoVertexCapacity) {
-			break;
-		}
-
-		switch (light.type) {
-		case LightType::Point:
-			addPointLightGizmo(vertices, light);
-			break;
-		case LightType::Spot:
-			addSpotLightGizmo(vertices, light);
-			break;
-		case LightType::Rect:
-			addRectLightGizmo(vertices, light);
-			break;
-		default:
-			break;
-		}
-	}
-
-	if (vertices.empty()) {
-		return;
-	}
-	if (vertices.size() > m_lightGizmoVertexCapacity) {
-		vertices.resize(m_lightGizmoVertexCapacity);
-	}
-
-	LightGizmoConstants constants{};
-	XMMATRIX viewProjection = camera.getView() * camera.getProj();
-	XMStoreFloat4x4(&constants.ViewProjection, XMMatrixTranspose(viewProjection));
-	m_lightGizmoConstantBuffer.update(deviceContext, nullptr, 0, nullptr, &constants, 0, 0);
-
-	D3D11_MAPPED_SUBRESOURCE mapped{};
-	HRESULT hr = deviceContext.m_deviceContext->Map(
-		m_lightGizmoVertexBuffer,
-		0,
-		D3D11_MAP_WRITE_DISCARD,
-		0,
-		&mapped);
-	if (FAILED(hr)) {
-		return;
-	}
-
-	std::memcpy(mapped.pData, vertices.data(), sizeof(LightGizmoVertex) * vertices.size());
-	deviceContext.m_deviceContext->Unmap(m_lightGizmoVertexBuffer, 0);
-
-	unsigned int stride = sizeof(LightGizmoVertex);
-	unsigned int offset = 0;
-	deviceContext.m_deviceContext->IASetVertexBuffers(0, 1, &m_lightGizmoVertexBuffer, &stride, &offset);
-	deviceContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
-
-	m_lightGizmoRasterizer.render(deviceContext);
-	m_lightGizmoDepthStencil.render(deviceContext, 0, false);
-	deviceContext.OMSetBlendState(m_alphaBlendState, m_blendFactor, 0xffffffff);
-	m_lightGizmoShader.render(deviceContext);
-	m_lightGizmoConstantBuffer.render(deviceContext, 0, 1, false);
-	deviceContext.m_deviceContext->Draw(static_cast<UINT>(vertices.size()), 0);
 	deviceContext.OMSetBlendState(m_opaqueBlendState, m_blendFactor, 0xffffffff);
 }
 
@@ -1081,46 +818,6 @@ DeferredRenderer::createLightingResources(Device& device) {
 	}
 
 	return m_fullscreenRasterizer.init(device, D3D11_FILL_SOLID, D3D11_CULL_NONE, false, false);
-}
-
-HRESULT
-DeferredRenderer::createLightGizmoResources(Device& device) {
-	LayoutBuilder lineBuilder;
-	lineBuilder.Add("POSITION", DXGI_FORMAT_R32G32B32_FLOAT)
-		.Add("COLOR", DXGI_FORMAT_R32G32B32A32_FLOAT);
-
-	HRESULT hr = m_lightGizmoShader.init(device, "LightGizmo.hlsl", lineBuilder);
-	if (FAILED(hr)) {
-		return hr;
-	}
-
-	hr = m_lightGizmoConstantBuffer.init(device, sizeof(LightGizmoConstants));
-	if (FAILED(hr)) {
-		return hr;
-	}
-
-	hr = m_lightGizmoDepthStencil.init(
-		device,
-		true,
-		D3D11_DEPTH_WRITE_MASK_ZERO,
-		D3D11_COMPARISON_LESS_EQUAL);
-	if (FAILED(hr)) {
-		return hr;
-	}
-
-	hr = m_lightGizmoRasterizer.init(device, D3D11_FILL_SOLID, D3D11_CULL_NONE, false, false);
-	if (FAILED(hr)) {
-		return hr;
-	}
-
-	SAFE_RELEASE(m_lightGizmoVertexBuffer);
-	m_lightGizmoVertexCapacity = kLightGizmoVertexCapacity;
-	D3D11_BUFFER_DESC desc{};
-	desc.Usage = D3D11_USAGE_DYNAMIC;
-	desc.ByteWidth = sizeof(LightGizmoVertex) * m_lightGizmoVertexCapacity;
-	desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-	desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-	return device.CreateBuffer(&desc, nullptr, &m_lightGizmoVertexBuffer);
 }
 
 HRESULT

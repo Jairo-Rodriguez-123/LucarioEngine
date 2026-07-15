@@ -357,5 +357,8 @@
     <ClInclude Include="include\Rendering\DeferredRenderer.h">
       <Filter>include\Rendering</Filter>
     </ClInclude>
+    <ClInclude Include="include\Rendering\RenderPipeline.h">
+      <Filter>include\Rendering</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

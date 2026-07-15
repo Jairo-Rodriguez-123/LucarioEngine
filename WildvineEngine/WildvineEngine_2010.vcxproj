@@ -501,6 +501,7 @@
     <ClInclude Include="include\Rendering\Material.h" />
     <ClInclude Include="include\Rendering\MaterialInstance.h" />
     <ClInclude Include="include\Rendering\Mesh.h" />
+    <ClInclude Include="include\Rendering\RenderPipeline.h" />
     <ClInclude Include="include\Rendering\RenderScene.h" />
     <ClInclude Include="include\Rendering\RenderTypes.h" />
     <ClInclude Include="include\EngineUtilities\Utilities\EngineMath.h" />

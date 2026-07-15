@@ -10,6 +10,35 @@
 #include <fstream>
 #include <iomanip>
 
+namespace {
+	bool isSerializedLightActorName(const std::string& actorName)
+	{
+		return actorName.rfind("Light Actor", 0) == 0;
+	}
+
+	void ensureDefaultLightComponent(const EU::TSharedPointer<Actor>& actor)
+	{
+		if (actor.isNull()) {
+			return;
+		}
+
+		EU::TSharedPointer<LightComponent> lightComponent = actor->getComponent<LightComponent>();
+		if (!lightComponent) {
+			lightComponent = EU::MakeShared<LightComponent>();
+			actor->addComponent(lightComponent);
+		}
+
+		LightData& light = lightComponent->getLightData();
+		light.type = LightType::Directional;
+		light.color = EU::Vector3(1.0f, 1.0f, 1.0f);
+		light.intensity = 1.0f;
+		light.direction = EU::Vector3(-0.20f, -1.0f, 1.0f);
+		light.range = 12.0f;
+		light.spotAngle = 0.0f;
+		lightComponent->setCastShadow(true);
+	}
+}
+
 HRESULT
 BaseApp::awake() {
 	HRESULT hr = S_OK;
@@ -128,7 +157,7 @@ BaseApp::init() {
 
 	// Load Resources -> Modelos, Texturas e Interfaz de usuario
 	std::array<std::string, 6> faces = {
-		"Skybox/cubemap_0.png", 
+		"Skybox/cubemap_0.png",
 		"Skybox/cubemap_1.png",
 		"Skybox/cubemap_2.png",
 		"Skybox/cubemap_3.png",
@@ -136,10 +165,15 @@ BaseApp::init() {
 		"Skybox/cubemap_5.png"
 	};
 	m_skyboxTex.CreateCubemap(m_device, m_deviceContext, faces, false);
+	HRESULT lightIconHr = m_lightIconTexture.init(m_device, "slate/icons/light-bulb", PNG);
+	if (FAILED(lightIconHr)) {
+		MESSAGE("Main", "InitDevice", "Light actor icon not found. Continuing with fallback light marker.");
+	}
 
 	// Set CyberGun Actor
 	m_cyberGun = EU::MakeShared<Actor>(m_device);
 	m_drakefirePistol = EU::MakeShared<Actor>(m_device);
+	m_sciFiToad = EU::MakeShared<Actor>(m_device);
 
 	if (!m_cyberGun.isNull()) {
 		m_model = new Model3D("CyberGun.fbx", ModelType::FBX);
@@ -243,6 +277,91 @@ BaseApp::init() {
 		return E_FAIL;
 	}
 
+	if (!m_sciFiToad.isNull()) {
+		m_toadModel = new Model3D("Models/Bake_Sci-fiToad.fbx", ModelType::FBX);
+		if (!m_toadModel || !m_toadModel->load("Models/Bake_Sci-fiToad.fbx")) {
+			ERROR("Main", "InitDevice", "Failed to load Sci-Fi Toad model.");
+			return E_FAIL;
+		}
+
+		hr = m_toadAlbedoSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_BC", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad albedo texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadNormalSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_N", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad normal texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadMetallicSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_M", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad metallic texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadRoughnessSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_R", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad roughness texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadAOSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_AO", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad AO texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadGlassAlbedoSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Glass_BC", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad glass albedo texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadGlassNormalSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Glass_N", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad glass normal texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadGlassRoughnessSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Glass_R", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad glass roughness texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadHeadAlbedoSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Head_BC", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad head albedo texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadHeadNormalSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Head_N", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad head normal texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+		hr = m_toadHeadRoughnessSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Head_R", PNG);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad head roughness texture. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+
+		m_sciFiToad->setName("Sci-Fi Toad");
+		m_actors.push_back(m_sciFiToad);
+		m_sciFiToad->getComponent<Transform>()->setTransform(EU::Vector3(0.0f, -1.90f, 10.5f),
+			EU::Vector3(0.0f, 3.14f, 0.0f),
+			EU::Vector3(1.0f, 1.0f, 1.0f));
+	}
+	else {
+		ERROR("Main", "InitDevice", "Failed to create Sci-Fi Toad Actor.");
+		return E_FAIL;
+	}
+
 	// Store the Actors in the Scene Graph
 	for (auto& actor : m_actors) {
 		m_sceneGraph.addEntity(actor.get());
@@ -251,10 +370,10 @@ BaseApp::init() {
 	LayoutBuilder builder;
 
 	builder.Add("POSITION", DXGI_FORMAT_R32G32B32_FLOAT)
-				 .Add("NORMAL", DXGI_FORMAT_R32G32B32_FLOAT)
-				 .Add("TANGENT", DXGI_FORMAT_R32G32B32_FLOAT)
-				 .Add("BITANGENT", DXGI_FORMAT_R32G32B32_FLOAT)
-				 .Add("TEXCOORD", DXGI_FORMAT_R32G32_FLOAT);
+		.Add("NORMAL", DXGI_FORMAT_R32G32B32_FLOAT)
+		.Add("TANGENT", DXGI_FORMAT_R32G32B32_FLOAT)
+		.Add("BITANGENT", DXGI_FORMAT_R32G32B32_FLOAT)
+		.Add("TEXCOORD", DXGI_FORMAT_R32G32_FLOAT);
 
 	// Create the Shader Program
 	hr = m_shaderProgram.init(m_device, "PBRShader.hlsl", builder);
@@ -271,7 +390,7 @@ BaseApp::init() {
 			("Failed to initialize m_constantBuffer Buffer. HRESULT: " + std::to_string(hr)).c_str());
 		return hr;
 	}
-	
+
 	m_camera.setLens(XM_PIDIV4, m_window.m_width / (float)m_window.m_height, 0.01f, 100.0f);
 	m_camera.setPosition(0.0f, 3.0f, -6.0f);
 
@@ -315,7 +434,24 @@ BaseApp::init() {
 	m_transparentPbrMaterial.setDomain(MaterialDomain::Transparent);
 	m_transparentPbrMaterial.setBlendMode(BlendMode::Alpha);
 
-	m_cyberGunMaterial.setMaterial(&m_pbrMaterial);
+	auto configurePbrMaterial = [&](Material& material) {
+		material.setShader(&m_shaderProgram);
+		material.setRasterizerState(&m_defaultRasterizer);
+		material.setDepthStencilState(&m_defaultDepthStencil);
+		material.setSamplerState(&m_defaultSampler);
+		material.setDomain(MaterialDomain::Opaque);
+		material.setBlendMode(BlendMode::Opaque);
+		};
+
+	configurePbrMaterial(m_cyberGunPbrMaterial);
+	configurePbrMaterial(m_drakefirePbrMaterial);
+	configurePbrMaterial(m_toadPbrMaterial);
+	configurePbrMaterial(m_toadGlassPbrMaterial);
+	configurePbrMaterial(m_toadHeadPbrMaterial);
+	m_toadGlassPbrMaterial.setDomain(MaterialDomain::Transparent);
+	m_toadGlassPbrMaterial.setBlendMode(BlendMode::Alpha);
+
+	m_cyberGunMaterial.setMaterial(&m_cyberGunPbrMaterial);
 	m_cyberGunMaterial.setAlbedo(&m_AlbedoSRV);
 	m_cyberGunMaterial.setNormal(&m_NormalSRV);
 	m_cyberGunMaterial.setMetallic(&m_MetallicSRV);
@@ -332,7 +468,7 @@ BaseApp::init() {
 	m_cyberGunMaterial.getParams().emissiveStrength = 1.0f;
 	m_cyberGunMaterial.getParams().alphaCutoff = 0.5f;
 
-	m_drakefireMaterial.setMaterial(&m_pbrMaterial);
+	m_drakefireMaterial.setMaterial(&m_drakefirePbrMaterial);
 	m_drakefireMaterial.setAlbedo(&m_drakefireAlbedoSRV);
 	m_drakefireMaterial.setNormal(&m_drakefireNormalSRV);
 	m_drakefireMaterial.setMetallic(&m_drakefireMetallicSRV);
@@ -344,6 +480,41 @@ BaseApp::init() {
 	m_drakefireMaterial.getParams().ao = 1.0f;
 	m_drakefireMaterial.getParams().normalScale = 1.0f;
 	m_drakefireMaterial.getParams().alphaCutoff = 0.5f;
+
+	m_toadMaterial.setMaterial(&m_toadPbrMaterial);
+	m_toadMaterial.setAlbedo(&m_toadAlbedoSRV);
+	m_toadMaterial.setNormal(&m_toadNormalSRV);
+	m_toadMaterial.setMetallic(&m_toadMetallicSRV);
+	m_toadMaterial.setRoughness(&m_toadRoughnessSRV);
+	m_toadMaterial.setAO(&m_toadAOSRV);
+	m_toadMaterial.getParams().baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	m_toadMaterial.getParams().metallic = 1.0f;
+	m_toadMaterial.getParams().roughness = 1.0f;
+	m_toadMaterial.getParams().ao = 1.0f;
+	m_toadMaterial.getParams().normalScale = 1.0f;
+	m_toadMaterial.getParams().alphaCutoff = 0.5f;
+
+	m_toadGlassMaterial.setMaterial(&m_toadGlassPbrMaterial);
+	m_toadGlassMaterial.setAlbedo(&m_toadGlassAlbedoSRV);
+	m_toadGlassMaterial.setNormal(&m_toadGlassNormalSRV);
+	m_toadGlassMaterial.setRoughness(&m_toadGlassRoughnessSRV);
+	m_toadGlassMaterial.getParams().baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 0.35f);
+	m_toadGlassMaterial.getParams().metallic = 0.0f;
+	m_toadGlassMaterial.getParams().roughness = 0.25f;
+	m_toadGlassMaterial.getParams().ao = 1.0f;
+	m_toadGlassMaterial.getParams().normalScale = 1.0f;
+	m_toadGlassMaterial.getParams().alphaCutoff = 0.5f;
+
+	m_toadHeadMaterial.setMaterial(&m_toadHeadPbrMaterial);
+	m_toadHeadMaterial.setAlbedo(&m_toadHeadAlbedoSRV);
+	m_toadHeadMaterial.setNormal(&m_toadHeadNormalSRV);
+	m_toadHeadMaterial.setRoughness(&m_toadHeadRoughnessSRV);
+	m_toadHeadMaterial.getParams().baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	m_toadHeadMaterial.getParams().metallic = 0.0f;
+	m_toadHeadMaterial.getParams().roughness = 1.0f;
+	m_toadHeadMaterial.getParams().ao = 1.0f;
+	m_toadHeadMaterial.getParams().normalScale = 1.0f;
+	m_toadHeadMaterial.getParams().alphaCutoff = 0.5f;
 
 	m_cyberGunRenderMesh.destroy();
 	for (const MeshComponent& meshComponent : m_model->GetMeshes()) {
@@ -363,6 +534,7 @@ BaseApp::init() {
 		}
 
 		submesh.indexCount = meshComponent.m_numIndex;
+		submesh.localTransform = meshComponent.m_localTransform;
 		submesh.materialSlot = 0;
 		m_cyberGunRenderMesh.getSubmeshes().push_back(std::move(submesh));
 	}
@@ -385,8 +557,46 @@ BaseApp::init() {
 		}
 
 		submesh.indexCount = meshComponent.m_numIndex;
+		submesh.localTransform = meshComponent.m_localTransform;
 		submesh.materialSlot = 0;
 		m_drakefireRenderMesh.getSubmeshes().push_back(std::move(submesh));
+	}
+
+	m_toadRenderMesh.destroy();
+	for (const MeshComponent& meshComponent : m_toadModel->GetMeshes()) {
+		Submesh submesh{};
+		hr = submesh.vertexBuffer.init(m_device, meshComponent, D3D11_BIND_VERTEX_BUFFER);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad vertex buffer. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+
+		hr = submesh.indexBuffer.init(m_device, meshComponent, D3D11_BIND_INDEX_BUFFER);
+		if (FAILED(hr)) {
+			ERROR("Main", "InitDevice",
+				("Failed to initialize Sci-Fi Toad index buffer. HRESULT: " + std::to_string(hr)).c_str());
+			return hr;
+		}
+
+		submesh.indexCount = meshComponent.m_numIndex;
+		submesh.localTransform = meshComponent.m_localTransform;
+		const std::string& meshName = meshComponent.m_name;
+		if (meshName.find("Eyes") != std::string::npos ||
+			(meshName.find("Head_low") != std::string::npos &&
+				meshName.find("GlassHead") == std::string::npos)) {
+			submesh.materialSlot = 2;
+		}
+		else if (meshName.find("Glass") != std::string::npos) {
+			submesh.materialSlot = 1;
+		}
+		else if (meshName.find("Head") != std::string::npos) {
+			submesh.materialSlot = 2;
+		}
+		else {
+			submesh.materialSlot = 0;
+		}
+		m_toadRenderMesh.getSubmeshes().push_back(std::move(submesh));
 	}
 
 	EU::TSharedPointer<MeshRendererComponent> meshRenderer = m_cyberGun->getComponent<MeshRendererComponent>();
@@ -409,9 +619,19 @@ BaseApp::init() {
 	drakefireMeshRenderer->setVisible(true);
 	drakefireMeshRenderer->setCastShadow(true);
 
+	EU::TSharedPointer<MeshRendererComponent> toadMeshRenderer = m_sciFiToad->getComponent<MeshRendererComponent>();
+	if (!toadMeshRenderer) {
+		toadMeshRenderer = EU::MakeShared<MeshRendererComponent>();
+		m_sciFiToad->addComponent(toadMeshRenderer);
+	}
+	toadMeshRenderer->setMesh(&m_toadRenderMesh);
+	toadMeshRenderer->setMaterialInstances({ &m_toadMaterial, &m_toadGlassMaterial, &m_toadHeadMaterial });
+	toadMeshRenderer->setVisible(true);
+	toadMeshRenderer->setCastShadow(true);
+
 	m_directionalLightActor = EU::MakeShared<Actor>(m_device);
 	if (!m_directionalLightActor.isNull()) {
-		m_directionalLightActor->setName("DirectionalLight");
+		m_directionalLightActor->setName("Light Actor 1");
 		EU::TSharedPointer<LightComponent> lightComponent = m_directionalLightActor->getComponent<LightComponent>();
 		if (!lightComponent) {
 			lightComponent = EU::MakeShared<LightComponent>();
@@ -422,8 +642,17 @@ BaseApp::init() {
 		lightComponent->getLightData().direction = m_constantBufferStruct.LightDir;
 		lightComponent->getLightData().color = m_constantBufferStruct.LightColor;
 		lightComponent->getLightData().intensity = 1.0f;
-		lightComponent->setCastShadow(false);
+		lightComponent->getLightData().range = 12.0f;
+		lightComponent->setCastShadow(true);
 
+		EU::TSharedPointer<Transform> transform = m_directionalLightActor->getComponent<Transform>();
+		if (transform) {
+			transform->setTransform(EU::Vector3(0.0f, 3.0f, 0.0f),
+				EU::Vector3(0.0f, 0.0f, 0.0f),
+				EU::Vector3(1.0f, 1.0f, 1.0f));
+		}
+
+		m_actors.push_back(m_directionalLightActor);
 		m_sceneGraph.addEntity(m_directionalLightActor.get());
 	}
 
@@ -436,17 +665,17 @@ BaseApp::init() {
 		return hr;
 	}
 
-	hr = m_forwardRenderer.init(m_device);
+	hr = m_renderPipeline.init(m_device, RendererType::Deferred);
 	if (FAILED(hr)) {
 		ERROR("Main", "InitDevice",
-			("Failed to initialize ForwardRenderer. HRESULT: " + std::to_string(hr)).c_str());
+			("Failed to initialize RenderPipeline. HRESULT: " + std::to_string(hr)).c_str());
 		return hr;
 	}
 
 	return S_OK;
 }
 
-void 
+void
 BaseApp::update(float deltaTime) {
 	// Update our time
 	static float t = 0.0f;
@@ -464,18 +693,35 @@ BaseApp::update(float deltaTime) {
 	}
 	// Update User Interface
 	m_gui.update(m_viewport, m_window);
-	bool show_demo_window = true;
-	//ImGui::ShowDemoWindow(&show_demo_window);
-	m_gui.drawViewportPanel(m_editorViewportPass.getSRV());
-	m_gui.drawRenderDebugPanel(m_forwardRenderer.getPreShadowSRV(), m_editorViewportPass.getSRV(), m_forwardRenderer.getShadowMapSRV());
-	m_gui.outliner(m_actors);
+	m_camera.updateViewMatrix();
+	if (m_gui.consumeCreateLightActorRequest()) {
+		EU::TSharedPointer<Actor> lightActor = createLightActor();
+		if (!lightActor.isNull()) {
+			m_gui.selectedActorIndex = static_cast<int>(m_actors.size()) - 1;
+		}
+	}
 	EU::TSharedPointer<Actor> selectedActor;
 	if (m_gui.selectedActorIndex >= 0 &&
 		m_gui.selectedActorIndex < static_cast<int>(m_actors.size())) {
 		selectedActor = m_actors[m_gui.selectedActorIndex];
 	}
+	bool show_demo_window = true;
+	//ImGui::ShowDemoWindow(&show_demo_window);
+	m_gui.drawViewportPanel(m_editorViewportPass.getSRV(), m_actors, m_camera, m_window, selectedActor, m_lightIconTexture.m_textureFromImg);
+	m_gui.drawRenderDebugPanel(m_renderPipeline.getPreShadowSRV(), m_editorViewportPass.getSRV(), m_renderPipeline.getShadowMapSRV());
+	m_gui.drawGBufferDebugPanel(m_renderPipeline.getGBufferAlbedoMetallicSRV(),
+		m_renderPipeline.getGBufferNormalRoughnessSRV(),
+		m_renderPipeline.getGBufferWorldAoSRV(),
+		m_renderPipeline.getGBufferEmissiveAlphaSRV(),
+		selectedActor);
+	m_renderPipeline.setShadowFactorDebugEnabled(m_gui.m_visualizeDeferredShadowFactor);
+	m_renderPipeline.setDeferredDebugViewMode(m_gui.m_deferredDebugViewMode);
+	m_gui.outliner(m_actors);
+	if (m_gui.selectedActorIndex >= 0 &&
+		m_gui.selectedActorIndex < static_cast<int>(m_actors.size())) {
+		selectedActor = m_actors[m_gui.selectedActorIndex];
+	}
 	m_gui.inspectorGeneral(selectedActor);
-	m_gui.editTransform(m_camera, m_window, selectedActor);
 	if (m_gui.consumeSaveSceneRequest()) {
 		saveScene(getDefaultScenePath());
 	}
@@ -515,23 +761,9 @@ BaseApp::update(float deltaTime) {
 		}
 	}
 
-	// Actualizar la matriz de proyeccion y vista
-	m_camera.updateViewMatrix();
-
 	XMStoreFloat4x4(&m_constantBufferStruct.View, XMMatrixTranspose(m_camera.getView()));
 	XMStoreFloat4x4(&m_constantBufferStruct.Projection, XMMatrixTranspose(m_camera.getProj()));
 	m_constantBufferStruct.CameraPos = m_camera.getPosition();
-	
-	// Luz blanca fuerte
-	m_gui.vec3Control("Light Direction", &m_constantBufferStruct.LightDir.x, 0.1f);
-	m_gui.vec3Control("Light Color", &m_constantBufferStruct.LightColor.x, 0.1f);
-	if (!m_directionalLightActor.isNull()) {
-		EU::TSharedPointer<LightComponent> lightComponent = m_directionalLightActor->getComponent<LightComponent>();
-		if (lightComponent) {
-			lightComponent->getLightData().direction = m_constantBufferStruct.LightDir;
-			lightComponent->getLightData().color = m_constantBufferStruct.LightColor;
-		}
-	}
 
 	// Update Skybox Pass -> Solo necesita la vista sin traslacion + proyeccion para funcionar correctamente (ver metodo update de Skybox)
 	m_skybox.update(m_deviceContext, m_camera);
@@ -541,7 +773,7 @@ BaseApp::update(float deltaTime) {
 
 }
 
-void 
+void
 BaseApp::render() {
 	handleEditorViewportResize();
 
@@ -550,7 +782,7 @@ BaseApp::render() {
 	m_renderScene.clear();
 	m_sceneGraph.gatherRenderScene(m_renderScene, m_camera);
 	m_renderScene.skybox = &m_skybox;
-	m_forwardRenderer.render(
+	m_renderPipeline.render(
 		m_deviceContext,
 		m_camera,
 		m_renderScene,
@@ -573,9 +805,10 @@ BaseApp::destroy() {
 	if (m_deviceContext.m_deviceContext) m_deviceContext.m_deviceContext->ClearState();
 	m_sceneGraph.destroy();
 	m_editorViewportPass.destroy();
-	m_forwardRenderer.destroy();
+	m_renderPipeline.destroy();
 	m_cyberGunRenderMesh.destroy();
 	m_drakefireRenderMesh.destroy();
+	m_toadRenderMesh.destroy();
 	m_AlbedoSRV.destroy();
 	m_MetallicSRV.destroy();
 	m_NormalSRV.destroy();
@@ -587,6 +820,18 @@ BaseApp::destroy() {
 	m_drakefireMetallicSRV.destroy();
 	m_drakefireRoughnessSRV.destroy();
 	m_drakefireAOSRV.destroy();
+	m_toadAlbedoSRV.destroy();
+	m_toadNormalSRV.destroy();
+	m_toadMetallicSRV.destroy();
+	m_toadRoughnessSRV.destroy();
+	m_toadAOSRV.destroy();
+	m_toadGlassAlbedoSRV.destroy();
+	m_toadGlassNormalSRV.destroy();
+	m_toadGlassRoughnessSRV.destroy();
+	m_toadHeadAlbedoSRV.destroy();
+	m_toadHeadNormalSRV.destroy();
+	m_toadHeadRoughnessSRV.destroy();
+	m_lightIconTexture.destroy();
 	m_defaultRasterizer.destroy();
 	m_defaultDepthStencil.destroy();
 	m_defaultSampler.destroy();
@@ -606,6 +851,8 @@ BaseApp::destroy() {
 	m_model = nullptr;
 	delete m_drakefireModel;
 	m_drakefireModel = nullptr;
+	delete m_toadModel;
+	m_toadModel = nullptr;
 	m_deviceContext.destroy();
 	m_device.destroy();
 }
@@ -617,17 +864,17 @@ BaseApp::WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
 	}
 
 	switch (message) {
-	case WM_CREATE:	{
+	case WM_CREATE: {
 		CREATESTRUCT* pCreate = reinterpret_cast<CREATESTRUCT*>(lParam);
 		SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)pCreate->lpCreateParams);
 	}
-	return 0;
+								return 0;
 	case WM_PAINT: {
 		PAINTSTRUCT ps;
 		BeginPaint(hWnd, &ps);
 		EndPaint(hWnd, &ps);
 	}
-	return 0;
+							 return 0;
 	case WM_SIZE:
 	{
 		// Evita recrear cuando esta minimizada
@@ -727,7 +974,7 @@ void BaseApp::handleEditorViewportResize()
 
 	// Intercambio seguro: el pass viejo queda en newPass y se destruye al salir
 	m_editorViewportPass.swap(newPass);
-	m_forwardRenderer.resize(m_device, m_pendingViewportWidth, m_pendingViewportHeight);
+	m_renderPipeline.resize(m_device, m_pendingViewportWidth, m_pendingViewportHeight);
 
 	m_editorViewportResizePending = false;
 }
@@ -736,6 +983,49 @@ std::string BaseApp::getDefaultScenePath() const
 {
 	CreateDirectoryA("Saved", nullptr);
 	return "Saved/DefaultScene.wvscene";
+}
+
+EU::TSharedPointer<Actor> BaseApp::createLightActor(const std::string& name)
+{
+	EU::TSharedPointer<Actor> lightActor = EU::MakeShared<Actor>(m_device);
+	if (lightActor.isNull()) {
+		ERROR("Main", "createLightActor", "Failed to create Light Actor.");
+		return lightActor;
+	}
+
+	size_t lightActorCount = 0;
+	for (const auto& actor : m_actors) {
+		if (!actor.isNull() && !actor->getComponent<LightComponent>().isNull()) {
+			++lightActorCount;
+		}
+	}
+
+	lightActor->setName(name.empty() ? "Light Actor " + std::to_string(lightActorCount + 1) : name);
+
+	EU::TSharedPointer<LightComponent> lightComponent = lightActor->getComponent<LightComponent>();
+	if (!lightComponent) {
+		lightComponent = EU::MakeShared<LightComponent>();
+		lightActor->addComponent(lightComponent);
+	}
+
+	lightComponent->getLightData().type = LightType::Point;
+	lightComponent->getLightData().direction = EU::Vector3(-0.20f, -1.0f, 1.0f);
+	lightComponent->getLightData().color = EU::Vector3(1.0f, 1.0f, 1.0f);
+	lightComponent->getLightData().intensity = 1.0f;
+	lightComponent->getLightData().range = 12.0f;
+	lightComponent->setCastShadow(false);
+
+	EU::TSharedPointer<Transform> transform = lightActor->getComponent<Transform>();
+	if (transform) {
+		const float lightOffset = static_cast<float>(lightActorCount) * 2.0f;
+		transform->setTransform(EU::Vector3(lightOffset, 3.0f, 0.0f),
+			EU::Vector3(0.0f, 0.0f, 0.0f),
+			EU::Vector3(1.0f, 1.0f, 1.0f));
+	}
+
+	m_actors.push_back(lightActor);
+	m_sceneGraph.addEntity(lightActor.get());
+	return lightActor;
 }
 
 bool BaseApp::saveScene(const std::string& path)
@@ -801,6 +1091,23 @@ bool BaseApp::saveScene(const std::string& path)
 			}
 		}
 
+		EU::TSharedPointer<LightComponent> lightComponent = actor->getComponent<LightComponent>();
+		if (lightComponent) {
+			const LightData& light = lightComponent->getLightData();
+			stream << "LIGHT_COMPONENT "
+				<< static_cast<int>(light.type) << " "
+				<< light.color.x << " "
+				<< light.color.y << " "
+				<< light.color.z << " "
+				<< light.intensity << " "
+				<< light.direction.x << " "
+				<< light.direction.y << " "
+				<< light.direction.z << " "
+				<< light.range << " "
+				<< light.spotAngle << " "
+				<< (lightComponent->canCastShadow() ? 1 : 0) << "\n";
+		}
+
 		stream << "END_ACTOR\n";
 	}
 
@@ -815,7 +1122,7 @@ bool BaseApp::saveScene(const std::string& path)
 	stream << "END_SCENE\n";
 	const std::wstring pathW(path.begin(), path.end());
 	MESSAGE("Main", "saveScene", L"Saved scene to '" << pathW << L"'")
-	return true;
+		return true;
 }
 
 bool BaseApp::loadScene(const std::string& path)
@@ -848,11 +1155,23 @@ bool BaseApp::loadScene(const std::string& path)
 			std::string actorName;
 			stream >> actorIndex >> std::quoted(actorName);
 			currentActor = EU::TSharedPointer<Actor>();
+			while (actorIndex >= m_actors.size()) {
+				EU::TSharedPointer<Actor> newActor = EU::MakeShared<Actor>(m_device);
+				if (newActor.isNull()) {
+					break;
+				}
+				newActor->setName("Actor " + std::to_string(m_actors.size() + 1));
+				m_actors.push_back(newActor);
+				m_sceneGraph.addEntity(newActor.get());
+			}
 			if (actorIndex < m_actors.size()) {
 				currentActor = m_actors[actorIndex];
 			}
 			if (!currentActor.isNull()) {
 				currentActor->setName(actorName);
+				if (isSerializedLightActorName(actorName)) {
+					ensureDefaultLightComponent(currentActor);
+				}
 			}
 		}
 		else if (token == "POSITION" && !currentActor.isNull()) {
@@ -930,6 +1249,35 @@ bool BaseApp::loadScene(const std::string& path)
 				}
 			}
 		}
+		else if (token == "LIGHT_COMPONENT" && !currentActor.isNull()) {
+			int type = 0;
+			int castShadow = 0;
+			LightData light{};
+			stream >> type
+				>> light.color.x
+				>> light.color.y
+				>> light.color.z
+				>> light.intensity
+				>> light.direction.x
+				>> light.direction.y
+				>> light.direction.z
+				>> light.range
+				>> light.spotAngle
+				>> castShadow;
+
+			if (type < static_cast<int>(LightType::Directional) || type > static_cast<int>(LightType::Spot)) {
+				type = static_cast<int>(LightType::Point);
+			}
+			light.type = static_cast<LightType>(type);
+
+			EU::TSharedPointer<LightComponent> lightComponent = currentActor->getComponent<LightComponent>();
+			if (!lightComponent) {
+				lightComponent = EU::MakeShared<LightComponent>();
+				currentActor->addComponent(lightComponent);
+			}
+			lightComponent->getLightData() = light;
+			lightComponent->setCastShadow(castShadow != 0);
+		}
 		else if (token == "LIGHT") {
 			stream >> m_constantBufferStruct.LightDir.x
 				>> m_constantBufferStruct.LightDir.y
@@ -956,9 +1304,8 @@ bool BaseApp::loadScene(const std::string& path)
 
 	const std::wstring pathW(path.begin(), path.end());
 	MESSAGE("Main", "loadScene", L"Loaded scene from '" << pathW << L"'")
-	return true;
+		return true;
 }
-
 
 
 
