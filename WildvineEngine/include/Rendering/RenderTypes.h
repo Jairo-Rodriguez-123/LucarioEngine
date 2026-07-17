@@ -32,8 +32,20 @@ MaterialDomain {
  /*
   *  @brief Blending mode used by materials for transparency.
  */
+
+ /*
+	*  @brief Tipo de renderizador activo en el motor.
+	*/
+enum class RendererType {
+	
+	Forward = 0,
+	Deferred
+};
+
 enum class
 BlendMode {
+
+
 	 /*
 	  *  @brief No blending, fully opaque.
 	 */

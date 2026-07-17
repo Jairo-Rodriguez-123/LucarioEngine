@@ -6,6 +6,7 @@
 #pragma once
 #include "Rendering/ForwardRenderer.h"
 #include "Rendering/DeferredRenderer.h"
+#include "Rendering/RenderTypes.h"
 
  /**
 	* @class RenderPipeline

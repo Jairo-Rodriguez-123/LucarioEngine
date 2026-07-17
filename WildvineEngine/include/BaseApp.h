@@ -175,7 +175,6 @@ private:
 
 	SceneGraph												m_sceneGraph;
 	std::vector<EU::TSharedPointer<Actor>> m_actors;
-	EU::TSharedPointer<Actor> m_cyberGun;
 	EU::TSharedPointer<Actor> m_drakefirePistol;
 	EU::TSharedPointer<Actor> m_sciFiToad;
 	EU::TSharedPointer<Actor> m_directionalLightActor;

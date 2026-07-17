@@ -38,7 +38,8 @@ public:
 	/*
 	 *  @brief Executes the full forward rendering pipeline for the given scene and viewport.
 	*/
-	void render(DeviceContext& deviceContext,
+	void 
+	render(DeviceContext& deviceContext,
 		const Camera& camera,
 		RenderScene& scene,
 		EditorViewportPass& viewportPass);
