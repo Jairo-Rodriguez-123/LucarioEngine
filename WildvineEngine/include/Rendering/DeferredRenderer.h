@@ -32,10 +32,12 @@ class Material;
 class
 	DeferredRenderer : public ISceneRenderer {
 public:
+	~DeferredRenderer() override { destroy(); }
+
 	HRESULT
 		init(Device& device) override;
 
-	void
+	HRESULT
 		resize(Device& device, unsigned int width, unsigned int height) override;
 
 	void
@@ -152,6 +154,7 @@ private:
 
 	EditorViewportPass m_preShadowDebugPass;
 	bool m_applyShadows = true;
+	bool m_hasShadowCastingLight = false;
 	unsigned int m_renderWidth = 1280;
 	unsigned int m_renderHeight = 720;
 

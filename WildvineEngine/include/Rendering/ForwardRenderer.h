@@ -4,6 +4,7 @@
 #include "DepthStencilState.h"
 #include "DepthStencilView.h"
 #include "RasterizerState.h"
+#include "Rendering/ISceneRenderer.h"
 #include "Rendering/RenderScene.h"
 #include "Rendering/RenderTypes.h"
 #include "ShaderProgram.h"
@@ -17,18 +18,20 @@ class Material;
 
 
 class
-ForwardRenderer {
+ForwardRenderer : public ISceneRenderer {
 public:
+	~ForwardRenderer() override { destroy(); }
+
 
 	/*
 	 *  @brief Initializes renderer resources using the provided device.
 	*/
-	HRESULT init(Device& device);
+	HRESULT init(Device& device) override;
 
 	/*
 	 *  @brief Resize internal render targets and resources to the provided dimensions.
 	*/
-	void resize(Device& device, unsigned int width, unsigned int height);
+	HRESULT resize(Device& device, unsigned int width, unsigned int height) override;
 
 	/*
 	 *  @brief Updates per-frame constant buffers and internal state based on the camera and scene.
@@ -42,22 +45,24 @@ public:
 	render(DeviceContext& deviceContext,
 		const Camera& camera,
 		RenderScene& scene,
-		EditorViewportPass& viewportPass);
+		EditorViewportPass& viewportPass) override;
 
 	/*
 	 *  @brief Releases all GPU and CPU resources owned by the renderer.
 	*/
-	void destroy();
+	void destroy() override;
 
 	/*
 	 *  @brief Returns a shader resource view for the generated shadow depth texture.
 	*/
-	ID3D11ShaderResourceView* getShadowMapSRV() const { return m_shadowDepthSRV.m_textureFromImg; }
+	ID3D11ShaderResourceView* getShadowMapSRV() const override { return m_shadowDepthSRV.m_textureFromImg; }
 
 	/*
 	 *  @brief Returns a shader resource view used for pre-shadow debug visualization.
 	*/
-	ID3D11ShaderResourceView* getPreShadowSRV() const { return m_preShadowDebugPass.getSRV(); }
+	ID3D11ShaderResourceView* getPreShadowSRV() const override { return m_preShadowDebugPass.getSRV(); }
+
+	const char* getDebugName() const override { return "ForwardRenderer"; }
 
 private:
 	/*
@@ -138,6 +143,10 @@ private:
 	*/
 	DepthStencilState m_transparentDepthStencil;
 	/*
+	 *  @brief Depth state used by the shadow pass; depth testing and writes are enabled.
+	 */
+	DepthStencilState m_shadowDepthStencil;
+	/*
 	 *  @brief Blend state used for standard alpha blending.
 	*/
 	ID3D11BlendState* m_alphaBlendState = nullptr;
@@ -189,6 +198,10 @@ private:
 	 *  @brief Flag toggling whether shadows are applied during rendering.
 	*/
 	bool m_applyShadows = true;
+	/*
+	 *  @brief True when the current scene contains a directional light allowed to cast shadows.
+	 */
+	bool m_hasShadowCastingLight = false;
 
 	/*
 	 *  @brief CPU-side mirror of per-frame constant buffer data.

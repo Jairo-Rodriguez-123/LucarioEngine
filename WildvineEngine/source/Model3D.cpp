@@ -10,14 +10,19 @@
 #include <fstream>
 #include <unordered_map>
 #include <sstream>
+#include <limits>
 
 namespace {
 constexpr uint32_t kModelCacheMagic = 0x48564D57; // WMVH
-constexpr uint32_t kModelCacheVersion = 1;
+constexpr uint32_t kModelCacheVersion = 4;
+constexpr uint32_t kMaxCachedMeshes = 100000;
+constexpr uint32_t kMaxCachedTextures = 100000;
+constexpr uint32_t kMaxCachedStringBytes = 1024 * 1024;
 
 struct ModelCacheEntry {
 	std::vector<MeshComponent> meshes;
 	std::vector<std::string> textureFileNames;
+	ULONGLONG sourceWriteTime = 0;
 };
 
 std::unordered_map<std::string, ModelCacheEntry> g_modelCache;
@@ -35,11 +40,31 @@ bool GetFileWriteTime(const std::string& path, ULONGLONG& outWriteTime) {
 	return true;
 }
 
+bool HasRemainingBytes(std::ifstream& stream, uint64_t byteCount) {
+	if (!stream.good()) return false;
+	const std::streampos current = stream.tellg();
+	if (current == std::streampos(-1)) return false;
+
+	stream.seekg(0, std::ios::end);
+	if (!stream.good()) return false;
+	const std::streampos end = stream.tellg();
+	if (end == std::streampos(-1) || end < current) return false;
+
+	stream.seekg(current);
+	if (!stream.good()) return false;
+	return static_cast<uint64_t>(end - current) >= byteCount;
+}
+
 bool WriteString(std::ofstream& stream, const std::string& value) {
+	if (value.size() > kMaxCachedStringBytes ||
+		value.size() > std::numeric_limits<uint32_t>::max()) {
+		return false;
+	}
+
 	const uint32_t length = static_cast<uint32_t>(value.size());
 	stream.write(reinterpret_cast<const char*>(&length), sizeof(length));
 	if (length > 0) {
-		stream.write(value.data(), length);
+		stream.write(value.data(), static_cast<std::streamsize>(length));
 	}
 	return stream.good();
 }
@@ -47,13 +72,13 @@ bool WriteString(std::ofstream& stream, const std::string& value) {
 bool ReadString(std::ifstream& stream, std::string& value) {
 	uint32_t length = 0;
 	stream.read(reinterpret_cast<char*>(&length), sizeof(length));
-	if (!stream.good()) {
+	if (!stream.good() || length > kMaxCachedStringBytes || !HasRemainingBytes(stream, length)) {
 		return false;
 	}
 
 	value.resize(length);
 	if (length > 0) {
-		stream.read(&value[0], length);
+		stream.read(&value[0], static_cast<std::streamsize>(length));
 	}
 	return stream.good();
 }
@@ -68,12 +93,18 @@ Model3D::load(const std::string& path) {
 	SetPath(path);
 	SetState(ResourceState::Loading);
 
+	ULONGLONG sourceWriteTime = 0;
+	const bool sourceTimestampAvailable = GetFileWriteTime(path, sourceWriteTime);
 	auto cacheIt = g_modelCache.find(path);
 	if (cacheIt != g_modelCache.end()) {
-		m_meshes = cacheIt->second.meshes;
-		textureFileNames = cacheIt->second.textureFileNames;
-		SetState(ResourceState::Loaded);
-		return true;
+		if (sourceTimestampAvailable && cacheIt->second.sourceWriteTime == sourceWriteTime) {
+			m_meshes = cacheIt->second.meshes;
+			textureFileNames = cacheIt->second.textureFileNames;
+			SetState(ResourceState::Loaded);
+			return true;
+		}
+		// The source changed (or disappeared), so never return stale geometry.
+		g_modelCache.erase(cacheIt);
 	}
 
 	const bool success = init();
@@ -88,7 +119,9 @@ bool Model3D::init()
 
 	const std::string cachePath = GetBinaryCachePath();
 	if (IsBinaryCacheUpToDate(m_filePath, cachePath) && LoadBinaryCache(cachePath)) {
-		g_modelCache[m_filePath] = ModelCacheEntry{ m_meshes, textureFileNames };
+		ULONGLONG sourceWriteTime = 0;
+		GetFileWriteTime(m_filePath, sourceWriteTime);
+		g_modelCache[m_filePath] = ModelCacheEntry{ m_meshes, textureFileNames, sourceWriteTime };
 		return true;
 	}
 
@@ -107,13 +140,15 @@ bool Model3D::init()
 		return false;
 	}
 
-	m_meshes = loadedMeshes;
-	g_modelCache[m_filePath] = ModelCacheEntry{ m_meshes, textureFileNames };
+	m_meshes = std::move(loadedMeshes);
+	ULONGLONG sourceWriteTime = 0;
+	GetFileWriteTime(m_filePath, sourceWriteTime);
+	g_modelCache[m_filePath] = ModelCacheEntry{ m_meshes, textureFileNames, sourceWriteTime };
 	SaveBinaryCache(cachePath);
 
 	const std::wstring modelPathW(m_filePath.begin(), m_filePath.end());
 	MESSAGE("ModelLoader", "ModelLoader",
-		L"Loaded model '" << modelPathW << L"' in " << elapsedMs << L" ms. Meshes: " << m_meshes.size())
+		L"Loaded model '" << modelPathW << L"' in " << elapsedMs << L" ms. Meshes: " << m_meshes.size());
 	return true;
 }
 
@@ -127,7 +162,8 @@ void Model3D::unload()
 		lSdkManager->Destroy();
 		lSdkManager = nullptr;
 	}
-
+	m_meshes.clear();
+	textureFileNames.clear();
 	SetState(ResourceState::Unloaded);
 }
 
@@ -136,6 +172,7 @@ size_t Model3D::getSizeInBytes() const
 	size_t totalSize = 0;
 	for (const auto& mesh : m_meshes) {
 		totalSize += mesh.m_vertex.size() * sizeof(SimpleVertex);
+		totalSize += mesh.m_skyVertex.size() * sizeof(SkyboxVertex);
 		totalSize += mesh.m_index.size() * sizeof(unsigned int);
 	}
 	return totalSize;
@@ -143,6 +180,16 @@ size_t Model3D::getSizeInBytes() const
 
 bool
 Model3D::InitializeFBXManager() {
+	// Permite recargar el mismo recurso sin conservar una escena/manager anterior.
+	if (lScene) {
+		lScene->Destroy();
+		lScene = nullptr;
+	}
+	if (lSdkManager) {
+		lSdkManager->Destroy();
+		lSdkManager = nullptr;
+	}
+
 	lSdkManager = FbxManager::Create();
 	if (!lSdkManager) {
 		ERROR("ModelLoader", "FbxManager::Create()", "Unable to create FBX Manager!");
@@ -150,11 +197,19 @@ Model3D::InitializeFBXManager() {
 	}
 
 	FbxIOSettings* ios = FbxIOSettings::Create(lSdkManager, IOSROOT);
+	if (!ios) {
+		ERROR("ModelLoader", "FbxIOSettings::Create()", "Unable to create FBX IO settings!");
+		lSdkManager->Destroy();
+		lSdkManager = nullptr;
+		return false;
+	}
 	lSdkManager->SetIOSettings(ios);
 
 	lScene = FbxScene::Create(lSdkManager, "MyScene");
 	if (!lScene) {
 		ERROR("ModelLoader", "FbxScene::Create()", "Unable to create FBX Scene!");
+		lSdkManager->Destroy();
+		lSdkManager = nullptr;
 		return false;
 	}
 	return true;
@@ -164,10 +219,22 @@ std::vector<MeshComponent>
 Model3D::LoadFBXModel(const std::string& filePath) {
 	std::vector<MeshComponent> loadedMeshes;
 
+	auto releaseFbxState = [this]() {
+		if (lScene) {
+			lScene->Destroy();
+			lScene = nullptr;
+		}
+		if (lSdkManager) {
+			lSdkManager->Destroy();
+			lSdkManager = nullptr;
+		}
+	};
+
 	if (InitializeFBXManager()) {
 		FbxImporter* lImporter = FbxImporter::Create(lSdkManager, "");
 		if (!lImporter) {
 			ERROR("ModelLoader", "FbxImporter::Create()", "Unable to create FBX Importer!");
+			releaseFbxState();
 			return loadedMeshes;
 		}
 
@@ -175,6 +242,7 @@ Model3D::LoadFBXModel(const std::string& filePath) {
 			ERROR("ModelLoader", "FbxImporter::Initialize()",
 				"Unable to initialize FBX Importer! Error: " << lImporter->GetStatus().GetErrorString());
 			lImporter->Destroy();
+			releaseFbxState();
 			return loadedMeshes;
 		}
 
@@ -182,6 +250,7 @@ Model3D::LoadFBXModel(const std::string& filePath) {
 			ERROR("ModelLoader", "FbxImporter::Import()",
 				"Unable to import FBX Scene! Error: " << lImporter->GetStatus().GetErrorString());
 			lImporter->Destroy();
+			releaseFbxState();
 			return loadedMeshes;
 		}
 		else {
@@ -202,11 +271,13 @@ Model3D::LoadFBXModel(const std::string& filePath) {
 				ProcessFBXNode(lRootNode->GetChild(i));
 			}
 			loadedMeshes = m_meshes;
+			releaseFbxState();
 			return loadedMeshes;
 		}
 		else {
 			ERROR("ModelLoader", "FbxScene::GetRootNode()",
 				"Unable to get root node from FBX Scene!");
+			releaseFbxState();
 			return loadedMeshes;
 		}
 	}
@@ -238,6 +309,7 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 
 	struct ObjMeshBuilder {
 		std::string name = "default";
+		std::string materialName = "default";
 		std::vector<SimpleVertex> vertices;
 		std::vector<unsigned int> indices;
 		std::unordered_map<ObjIndex, unsigned int, ObjIndexHasher> vertexLookup;
@@ -275,27 +347,52 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 			(secondSlash == std::string::npos ? token.substr(firstSlash + 1) : token.substr(firstSlash + 1, secondSlash - firstSlash - 1));
 		const std::string normalToken = (secondSlash == std::string::npos) ? std::string() : token.substr(secondSlash + 1);
 
-		if (!positionToken.empty()) result.position = fixIndex(std::stoi(positionToken), positionCount);
-		if (!texcoordToken.empty()) result.texcoord = fixIndex(std::stoi(texcoordToken), texcoordCount);
-		if (!normalToken.empty()) result.normal = fixIndex(std::stoi(normalToken), normalCount);
+		try {
+			if (!positionToken.empty()) result.position = fixIndex(std::stoi(positionToken), positionCount);
+			if (!texcoordToken.empty()) result.texcoord = fixIndex(std::stoi(texcoordToken), texcoordCount);
+			if (!normalToken.empty()) result.normal = fixIndex(std::stoi(normalToken), normalCount);
+		}
+		catch (const std::exception&) {
+			return ObjIndex{};
+		}
 
 		return result;
 	};
 
 	auto computeTangents = [&](MeshComponent& mesh) {
+		std::vector<EU::Vector3> generatedNormals(mesh.m_vertex.size(), EU::Vector3(0.0f, 0.0f, 0.0f));
+
 		for (size_t i = 0; i + 2 < mesh.m_index.size(); i += 3) {
-			SimpleVertex& v0 = mesh.m_vertex[mesh.m_index[i + 0]];
-			SimpleVertex& v1 = mesh.m_vertex[mesh.m_index[i + 1]];
-			SimpleVertex& v2 = mesh.m_vertex[mesh.m_index[i + 2]];
+			const unsigned int i0 = mesh.m_index[i + 0];
+			const unsigned int i1 = mesh.m_index[i + 1];
+			const unsigned int i2 = mesh.m_index[i + 2];
+			if (i0 >= mesh.m_vertex.size() || i1 >= mesh.m_vertex.size() || i2 >= mesh.m_vertex.size()) {
+				continue;
+			}
+
+			SimpleVertex& v0 = mesh.m_vertex[i0];
+			SimpleVertex& v1 = mesh.m_vertex[i1];
+			SimpleVertex& v2 = mesh.m_vertex[i2];
 
 			const EU::Vector3 edge1 = v1.Position - v0.Position;
 			const EU::Vector3 edge2 = v2.Position - v0.Position;
+			const EU::Vector3 faceNormal(
+				edge1.y * edge2.z - edge1.z * edge2.y,
+				edge1.z * edge2.x - edge1.x * edge2.z,
+				edge1.x * edge2.y - edge1.y * edge2.x);
+			generatedNormals[i0] += faceNormal;
+			generatedNormals[i1] += faceNormal;
+			generatedNormals[i2] += faceNormal;
+
 			const float du1 = v1.TextureCoordinate.x - v0.TextureCoordinate.x;
 			const float dv1 = v1.TextureCoordinate.y - v0.TextureCoordinate.y;
 			const float du2 = v2.TextureCoordinate.x - v0.TextureCoordinate.x;
 			const float dv2 = v2.TextureCoordinate.y - v0.TextureCoordinate.y;
 			const float denominator = du1 * dv2 - du2 * dv1;
-			const float invDenominator = std::fabs(denominator) < 1e-8f ? 0.0f : 1.0f / denominator;
+			if (std::fabs(denominator) < 1e-8f) {
+				continue;
+			}
+			const float invDenominator = 1.0f / denominator;
 
 			const EU::Vector3 tangent(
 				(edge1.x * dv2 - edge2.x * dv1) * invDenominator,
@@ -314,7 +411,15 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 			v2.Bitangent += bitangent;
 		}
 
-		for (SimpleVertex& vertex : mesh.m_vertex) {
+		for (size_t vertexIndex = 0; vertexIndex < mesh.m_vertex.size(); ++vertexIndex) {
+			SimpleVertex& vertex = mesh.m_vertex[vertexIndex];
+			const float normalLengthSq =
+				vertex.Normal.x * vertex.Normal.x +
+				vertex.Normal.y * vertex.Normal.y +
+				vertex.Normal.z * vertex.Normal.z;
+			if (normalLengthSq <= 1e-20f) {
+				vertex.Normal = generatedNormals[vertexIndex];
+			}
 			normalize(vertex.Normal);
 
 			const float tangentDotNormal =
@@ -322,6 +427,20 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 				vertex.Tangent.y * vertex.Normal.y +
 				vertex.Tangent.z * vertex.Normal.z;
 			vertex.Tangent = vertex.Tangent - (vertex.Normal * tangentDotNormal);
+
+			const float tangentLengthSq =
+				vertex.Tangent.x * vertex.Tangent.x +
+				vertex.Tangent.y * vertex.Tangent.y +
+				vertex.Tangent.z * vertex.Tangent.z;
+			if (tangentLengthSq <= 1e-20f) {
+				const EU::Vector3 reference = std::fabs(vertex.Normal.y) < 0.999f
+					? EU::Vector3(0.0f, 1.0f, 0.0f)
+					: EU::Vector3(1.0f, 0.0f, 0.0f);
+				vertex.Tangent = EU::Vector3(
+					reference.y * vertex.Normal.z - reference.z * vertex.Normal.y,
+					reference.z * vertex.Normal.x - reference.x * vertex.Normal.z,
+					reference.x * vertex.Normal.y - reference.y * vertex.Normal.x);
+			}
 			normalize(vertex.Tangent);
 
 			vertex.Bitangent = EU::Vector3(
@@ -338,8 +457,16 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 			return;
 		}
 
+		if (builder.vertices.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+			builder.indices.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+			ERROR("ModelLoader", "LoadOBJModel", "OBJ mesh is too large for the engine buffer counters.");
+			builder = ObjMeshBuilder{};
+			return;
+		}
+
 		MeshComponent mesh;
 		mesh.m_name = builder.name;
+		mesh.m_materialName = builder.materialName;
 		mesh.m_vertex = std::move(builder.vertices);
 		mesh.m_index = std::move(builder.indices);
 		mesh.m_numVertex = static_cast<int>(mesh.m_vertex.size());
@@ -361,7 +488,9 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 	std::vector<MeshComponent> loadedMeshes;
 	ObjMeshBuilder currentMesh;
 	std::string currentGroupName = "default";
+	std::string currentMaterialName = "default";
 	currentMesh.name = currentGroupName;
+	currentMesh.materialName = currentMaterialName;
 
 	std::string line;
 	while (std::getline(file, line)) {
@@ -374,21 +503,38 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 		stream >> command;
 
 		if (command == "v") {
-			EU::Vector3 position;
-			stream >> position.x >> position.y >> position.z;
-			positions.push_back(position);
+			EU::Vector3 position{};
+			if ((stream >> position.x >> position.y >> position.z) &&
+				std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z)) {
+				if (positions.size() >= static_cast<size_t>(std::numeric_limits<int>::max())) {
+					ERROR("ModelLoader", "LoadOBJModel", "OBJ contains too many positions.");
+					return {};
+				}
+				positions.push_back(position);
+			}
 		}
 		else if (command == "vt") {
-			EU::Vector2 uv;
-			stream >> uv.x >> uv.y;
-			uv.y = 1.0f - uv.y;
-			texcoords.push_back(uv);
+			EU::Vector2 uv{};
+			if ((stream >> uv.x >> uv.y) && std::isfinite(uv.x) && std::isfinite(uv.y)) {
+				if (texcoords.size() >= static_cast<size_t>(std::numeric_limits<int>::max())) {
+					ERROR("ModelLoader", "LoadOBJModel", "OBJ contains too many texture coordinates.");
+					return {};
+				}
+				uv.y = 1.0f - uv.y;
+				texcoords.push_back(uv);
+			}
 		}
 		else if (command == "vn") {
-			EU::Vector3 normal;
-			stream >> normal.x >> normal.y >> normal.z;
-			normalize(normal);
-			normals.push_back(normal);
+			EU::Vector3 normal{};
+			if ((stream >> normal.x >> normal.y >> normal.z) &&
+				std::isfinite(normal.x) && std::isfinite(normal.y) && std::isfinite(normal.z)) {
+				if (normals.size() >= static_cast<size_t>(std::numeric_limits<int>::max())) {
+					ERROR("ModelLoader", "LoadOBJModel", "OBJ contains too many normals.");
+					return {};
+				}
+				normalize(normal);
+				normals.push_back(normal);
+			}
 		}
 		else if (command == "g" || command == "o") {
 			flushMesh(currentMesh, loadedMeshes);
@@ -397,12 +543,23 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 				currentGroupName = "default";
 			}
 			currentMesh.name = currentGroupName;
+			currentMesh.materialName = currentMaterialName;
 		}
 		else if (command == "usemtl") {
 			if (!currentMesh.indices.empty()) {
 				flushMesh(currentMesh, loadedMeshes);
 			}
+			std::getline(stream, currentMaterialName);
+			const size_t first = currentMaterialName.find_first_not_of(" \t\r\n");
+			const size_t last = currentMaterialName.find_last_not_of(" \t\r\n");
+			if (first == std::string::npos) {
+				currentMaterialName = "default";
+			}
+			else {
+				currentMaterialName = currentMaterialName.substr(first, last - first + 1);
+			}
 			currentMesh.name = currentGroupName;
+			currentMesh.materialName = currentMaterialName;
 		}
 		else if (command == "f") {
 			std::vector<unsigned int> polygonIndices;
@@ -413,6 +570,10 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 					static_cast<int>(positions.size()),
 					static_cast<int>(texcoords.size()),
 					static_cast<int>(normals.size()));
+				if (objIndex.position < 0 || objIndex.position >= static_cast<int>(positions.size())) {
+					polygonIndices.clear();
+					break;
+				}
 
 				auto it = currentMesh.vertexLookup.find(objIndex);
 				if (it == currentMesh.vertexLookup.end()) {
@@ -430,11 +591,16 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 						vertex.Normal = normals[objIndex.normal];
 					}
 					else {
-						vertex.Normal = EU::Vector3(0.0f, 1.0f, 0.0f);
+						// Leave missing normals at zero so computeTangents can derive them from geometry.
+						vertex.Normal = EU::Vector3(0.0f, 0.0f, 0.0f);
 					}
 					vertex.Tangent = EU::Vector3(0.0f, 0.0f, 0.0f);
 					vertex.Bitangent = EU::Vector3(0.0f, 0.0f, 0.0f);
 
+					if (currentMesh.vertices.size() >= static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+						polygonIndices.clear();
+						break;
+					}
 					const unsigned int newIndex = static_cast<unsigned int>(currentMesh.vertices.size());
 					currentMesh.vertices.push_back(vertex);
 					currentMesh.vertexLookup[objIndex] = newIndex;
@@ -446,6 +612,10 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 			}
 
 			for (size_t i = 1; i + 1 < polygonIndices.size(); ++i) {
+				if (currentMesh.indices.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - 3u) {
+					ERROR("ModelLoader", "LoadOBJModel", "OBJ contains too many indices.");
+					return {};
+				}
 				currentMesh.indices.push_back(polygonIndices[0]);
 				currentMesh.indices.push_back(polygonIndices[i]);
 				currentMesh.indices.push_back(polygonIndices[i + 1]);
@@ -459,6 +629,14 @@ Model3D::LoadOBJModel(const std::string& filePath) {
 
 void 
 Model3D::ProcessFBXNode(FbxNode* node) {
+	if (!node) {
+		return;
+	}
+
+	for (int materialIndex = 0; materialIndex < node->GetMaterialCount(); ++materialIndex) {
+		ProcessFBXMaterials(node->GetMaterial(materialIndex));
+	}
+
 	if (node->GetNodeAttribute()) {
 		if (node->GetNodeAttribute()->GetAttributeType() == FbxNodeAttribute::eMesh) {
 			ProcessFBXMesh(node);
@@ -474,6 +652,13 @@ void
 Model3D::ProcessFBXMesh(FbxNode* node) {
   FbxMesh* mesh = node->GetMesh();
   if (!mesh) return;
+
+  const int polygonCount = mesh->GetPolygonCount();
+  const int controlPointCount = mesh->GetControlPointsCount();
+  if (polygonCount <= 0 || controlPointCount <= 0 ||
+      polygonCount > (std::numeric_limits<int>::max() / 3)) {
+    return;
+  }
 
   if (mesh->GetElementNormalCount() == 0)
     mesh->GenerateNormals(true, true);
@@ -493,39 +678,56 @@ Model3D::ProcessFBXMesh(FbxNode* node) {
 
   std::vector<SimpleVertex> vertices;
   std::vector<unsigned int> indices;
-  vertices.reserve(mesh->GetPolygonCount() * 3);
-  indices.reserve(mesh->GetPolygonCount() * 3);
+  const size_t estimatedCornerCount = static_cast<size_t>(polygonCount) * 3u;
+  vertices.reserve(estimatedCornerCount);
+  indices.reserve(estimatedCornerCount);
 
-  auto readV2 = [](const FbxGeometryElementUV* elem, int cpIdx, int pvIdx) -> FbxVector2 {
-    if (!elem) return FbxVector2(0, 0);
+  auto resolveElementIndex = [](auto* elem, int cpIdx, int pvIdx) -> int {
+    if (!elem) return -1;
     using E = FbxGeometryElement;
-    int idx;
-    if (elem->GetMappingMode() == E::eByControlPoint)
-      idx = (elem->GetReferenceMode() == E::eIndexToDirect) ? elem->GetIndexArray().GetAt(cpIdx) : cpIdx;
-    else
-      idx = (elem->GetReferenceMode() == E::eIndexToDirect) ? elem->GetIndexArray().GetAt(pvIdx) : pvIdx;
-    return elem->GetDirectArray().GetAt(idx);
-    };
-  auto readV4 = [](auto* elem, int cpIdx, int pvIdx) -> FbxVector4 {
-    if (!elem) return FbxVector4(0, 0, 0, 0);
-    using E = FbxGeometryElement;
-    int idx;
-    if (elem->GetMappingMode() == E::eByControlPoint)
-      idx = (elem->GetReferenceMode() == E::eIndexToDirect) ? elem->GetIndexArray().GetAt(cpIdx) : cpIdx;
-    else
-      idx = (elem->GetReferenceMode() == E::eIndexToDirect) ? elem->GetIndexArray().GetAt(pvIdx) : pvIdx;
-    return elem->GetDirectArray().GetAt(idx);
+    int sourceIndex = -1;
+    switch (elem->GetMappingMode()) {
+    case E::eByControlPoint: sourceIndex = cpIdx; break;
+    case E::eByPolygonVertex: sourceIndex = pvIdx; break;
+    default: return -1;
+    }
+    if (sourceIndex < 0) return -1;
+
+    int directIndex = sourceIndex;
+    if (elem->GetReferenceMode() == E::eIndexToDirect) {
+      if (sourceIndex >= elem->GetIndexArray().GetCount()) return -1;
+      directIndex = elem->GetIndexArray().GetAt(sourceIndex);
+    }
+    else if (elem->GetReferenceMode() != E::eDirect) {
+      return -1;
+    }
+    return (directIndex >= 0 && directIndex < elem->GetDirectArray().GetCount()) ? directIndex : -1;
     };
 
-  for (int p = 0; p < mesh->GetPolygonCount(); ++p)
+  auto readV2 = [&resolveElementIndex](const FbxGeometryElementUV* elem, int cpIdx, int pvIdx) -> FbxVector2 {
+    const int idx = resolveElementIndex(elem, cpIdx, pvIdx);
+    return (idx >= 0) ? elem->GetDirectArray().GetAt(idx) : FbxVector2(0, 0);
+    };
+  auto readV4 = [&resolveElementIndex](auto* elem, int cpIdx, int pvIdx) -> FbxVector4 {
+    const int idx = resolveElementIndex(elem, cpIdx, pvIdx);
+    return (idx >= 0) ? elem->GetDirectArray().GetAt(idx) : FbxVector4(0, 0, 0, 0);
+    };
+
+  for (int p = 0; p < polygonCount; ++p)
   {
     const int polySize = mesh->GetPolygonSize(p);
+    if (polySize < 3) continue;
     std::vector<unsigned> cornerIdx; cornerIdx.reserve(polySize);
+    bool polygonValid = true;
 
     for (int v = 0; v < polySize; ++v)
     {
       const int cpIndex = mesh->GetPolygonVertex(p, v);
       const int pvIndex = mesh->GetPolygonVertexIndex(p) + v;
+      if (cpIndex < 0 || cpIndex >= controlPointCount) {
+        polygonValid = false;
+        break;
+      }
 
       SimpleVertex out{};
 
@@ -534,12 +736,18 @@ Model3D::ProcessFBXMesh(FbxNode* node) {
 
       FbxVector4 N(0, 1, 0, 0);
       mesh->GetPolygonVertexNormal(p, v, N);
-      N.Normalize();
+      if (N.SquareLength() > 1e-16) {
+        N.Normalize();
+      }
+      else {
+        N = FbxVector4(0, 1, 0, 0);
+      }
       out.Normal = { (float)N[0], (float)N[1], (float)N[2] };
 
       if (uvElem && uvSetName) {
         int uvIdx = mesh->GetTextureUVIndex(p, v);
-        FbxVector2 uv = (uvIdx >= 0) ? uvElem->GetDirectArray().GetAt(uvIdx)
+        FbxVector2 uv = (uvIdx >= 0 && uvIdx < uvElem->GetDirectArray().GetCount())
+          ? uvElem->GetDirectArray().GetAt(uvIdx)
           : readV2(uvElem, cpIndex, pvIndex);
         out.TextureCoordinate = { (float)uv[0], 1.0f - (float)uv[1] };
       }
@@ -559,8 +767,17 @@ Model3D::ProcessFBXMesh(FbxNode* node) {
       }
       else out.Bitangent = { 0,0,0 };
 
-      cornerIdx.push_back((unsigned)vertices.size());
+      if (vertices.size() >= static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        polygonValid = false;
+        break;
+      }
+      cornerIdx.push_back(static_cast<unsigned int>(vertices.size()));
       vertices.push_back(out);
+    }
+
+    if (!polygonValid || cornerIdx.size() != static_cast<size_t>(polySize)) {
+      vertices.resize(vertices.size() - cornerIdx.size());
+      continue;
     }
 
     for (int k = 1; k + 1 < polySize; ++k) {
@@ -605,8 +822,8 @@ Model3D::ProcessFBXMesh(FbxNode* node) {
     }
   }
 
-  bool autoDetectMirror = true;
-  bool forceFlipWinding = true;
+  const bool autoDetectMirror = true;
+  const bool forceFlipWinding = false;
 
   bool mirrored = true;
   if (autoDetectMirror) {
@@ -633,7 +850,18 @@ Model3D::ProcessFBXMesh(FbxNode* node) {
   }
 
   auto dot3 = [](const EU::Vector3& a, const EU::Vector3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
-  auto norm3 = [](EU::Vector3& v) { float l = std::sqrt(EU::EMax(1e-20f, v.x * v.x + v.y * v.y + v.z * v.z)); v.x /= l; v.y /= l; v.z /= l; };
+  auto lengthSq3 = [](const EU::Vector3& v) { return v.x * v.x + v.y * v.y + v.z * v.z; };
+  auto norm3 = [&](EU::Vector3& v, const EU::Vector3& fallback) {
+    const float lengthSq = lengthSq3(v);
+    if (lengthSq <= 1e-20f) {
+      v = fallback;
+      return;
+    }
+    const float invLength = 1.0f / std::sqrt(lengthSq);
+    v.x *= invLength;
+    v.y *= invLength;
+    v.z *= invLength;
+  };
   auto sub3 = [](const EU::Vector3& a, const EU::Vector3& b) { return EU::Vector3(a.x - b.x, a.y - b.y, a.z - b.z); };
   auto cross3 = [](const EU::Vector3& a, const EU::Vector3& b) {
     return EU::Vector3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
@@ -641,15 +869,28 @@ Model3D::ProcessFBXMesh(FbxNode* node) {
   
   for (auto& v : vertices)
   {
-    norm3(v.Normal);
-    float dTN = dot3(v.Tangent, v.Normal);
+    norm3(v.Normal, EU::Vector3(0.0f, 1.0f, 0.0f));
+    const float dTN = dot3(v.Tangent, v.Normal);
     v.Tangent = sub3(v.Tangent, EU::Vector3(v.Normal.x * dTN, v.Normal.y * dTN, v.Normal.z * dTN));
-    norm3(v.Tangent);
+
+    if (lengthSq3(v.Tangent) <= 1e-20f) {
+      const EU::Vector3 reference = std::fabs(v.Normal.y) < 0.999f
+        ? EU::Vector3(0.0f, 1.0f, 0.0f)
+        : EU::Vector3(1.0f, 0.0f, 0.0f);
+      v.Tangent = cross3(reference, v.Normal);
+    }
+    norm3(v.Tangent, EU::Vector3(1.0f, 0.0f, 0.0f));
   
     EU::Vector3 Bcalc = cross3(v.Normal, v.Tangent);
-    float hand = (dot3(Bcalc, v.Bitangent) < 0.0f) ? -1.0f : 1.0f;
+    const float hand = (dot3(Bcalc, v.Bitangent) < 0.0f) ? -1.0f : 1.0f;
     v.Bitangent = { Bcalc.x * hand, Bcalc.y * hand, Bcalc.z * hand };
-    norm3(v.Bitangent);
+    norm3(v.Bitangent, EU::Vector3(0.0f, 0.0f, 1.0f));
+  }
+
+  if (vertices.empty() || indices.empty() || (indices.size() % 3u) != 0u ||
+      vertices.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+      indices.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    return;
   }
 
   MeshComponent mc;
@@ -658,21 +899,68 @@ Model3D::ProcessFBXMesh(FbxNode* node) {
   mc.m_index = std::move(indices);
   mc.m_numVertex = (int)mc.m_vertex.size();
   mc.m_numIndex = (int)mc.m_index.size();
+
+  // FBX matrices use a column-vector convention. Transpose into the
+  // row-vector convention used by XNAMath/Direct3D in the engine.
+  FbxAMatrix geometricTransform;
+  geometricTransform.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
+  geometricTransform.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
+  geometricTransform.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
+  const FbxAMatrix globalTransform = node->EvaluateGlobalTransform() * geometricTransform;
+  mc.m_localTransform._11 = static_cast<float>(globalTransform.Get(0, 0));
+  mc.m_localTransform._12 = static_cast<float>(globalTransform.Get(1, 0));
+  mc.m_localTransform._13 = static_cast<float>(globalTransform.Get(2, 0));
+  mc.m_localTransform._14 = static_cast<float>(globalTransform.Get(3, 0));
+  mc.m_localTransform._21 = static_cast<float>(globalTransform.Get(0, 1));
+  mc.m_localTransform._22 = static_cast<float>(globalTransform.Get(1, 1));
+  mc.m_localTransform._23 = static_cast<float>(globalTransform.Get(2, 1));
+  mc.m_localTransform._24 = static_cast<float>(globalTransform.Get(3, 1));
+  mc.m_localTransform._31 = static_cast<float>(globalTransform.Get(0, 2));
+  mc.m_localTransform._32 = static_cast<float>(globalTransform.Get(1, 2));
+  mc.m_localTransform._33 = static_cast<float>(globalTransform.Get(2, 2));
+  mc.m_localTransform._34 = static_cast<float>(globalTransform.Get(3, 2));
+  mc.m_localTransform._41 = static_cast<float>(globalTransform.Get(0, 3));
+  mc.m_localTransform._42 = static_cast<float>(globalTransform.Get(1, 3));
+  mc.m_localTransform._43 = static_cast<float>(globalTransform.Get(2, 3));
+  mc.m_localTransform._44 = static_cast<float>(globalTransform.Get(3, 3));
   m_meshes.push_back(std::move(mc));
 }
 
 void Model3D::ProcessFBXMaterials(FbxSurfaceMaterial* material)
 {
-	if (material) {
-		FbxProperty prop = material->FindProperty(FbxSurfaceMaterial::sDiffuse);
-		if (prop.IsValid()) {
-			int textureCount = prop.GetSrcObjectCount<FbxTexture>();
-			for (int i = 0; i < textureCount; ++i) {
-				FbxTexture* texture = FbxCast<FbxTexture>(prop.GetSrcObject<FbxTexture>(i));
-				if (texture) {
-					textureFileNames.push_back(texture->GetName());
-				}
+	if (!material) {
+		return;
+	}
+
+	FbxProperty prop = material->FindProperty(FbxSurfaceMaterial::sDiffuse);
+	if (!prop.IsValid()) {
+		return;
+	}
+
+	const int textureCount = prop.GetSrcObjectCount<FbxTexture>();
+	for (int i = 0; i < textureCount; ++i) {
+		FbxTexture* texture = FbxCast<FbxTexture>(prop.GetSrcObject<FbxTexture>(i));
+		if (!texture) {
+			continue;
+		}
+
+		std::string textureName;
+		if (FbxFileTexture* fileTexture = FbxCast<FbxFileTexture>(texture)) {
+			const char* fileName = fileTexture->GetFileName();
+			if (fileName && *fileName) {
+				textureName = fileName;
 			}
+		}
+		if (textureName.empty()) {
+			const char* objectName = texture->GetName();
+			if (objectName && *objectName) {
+				textureName = objectName;
+			}
+		}
+
+		if (!textureName.empty() &&
+			std::find(textureFileNames.begin(), textureFileNames.end(), textureName) == textureFileNames.end()) {
+			textureFileNames.push_back(std::move(textureName));
 		}
 	}
 }
@@ -715,7 +1003,16 @@ Model3D::LoadBinaryCache(const std::string& cachePath) {
 	stream.read(reinterpret_cast<char*>(&meshCount), sizeof(meshCount));
 	stream.read(reinterpret_cast<char*>(&textureCount), sizeof(textureCount));
 
-	if (!stream.good() || magic != kModelCacheMagic || version != kModelCacheVersion) {
+	if (!stream.good() || magic != kModelCacheMagic || version != kModelCacheVersion ||
+		meshCount > kMaxCachedMeshes || textureCount > kMaxCachedTextures) {
+		return false;
+	}
+
+	// Cada textura necesita al menos su longitud (uint32_t) y cada mesh al menos
+	// su nombre. Esta comprobacion evita reserve() absurdos en caches corruptos.
+	const uint64_t minimumRecordBytes =
+		(static_cast<uint64_t>(meshCount) + static_cast<uint64_t>(textureCount)) * sizeof(uint32_t);
+	if (!HasRemainingBytes(stream, minimumRecordBytes)) {
 		return false;
 	}
 
@@ -734,7 +1031,7 @@ Model3D::LoadBinaryCache(const std::string& cachePath) {
 
 	for (uint32_t i = 0; i < meshCount; ++i) {
 		MeshComponent mesh;
-		if (!ReadString(stream, mesh.m_name)) {
+		if (!ReadString(stream, mesh.m_name) || !ReadString(stream, mesh.m_materialName)) {
 			return false;
 		}
 
@@ -742,6 +1039,23 @@ Model3D::LoadBinaryCache(const std::string& cachePath) {
 		uint32_t indexCount = 0;
 		stream.read(reinterpret_cast<char*>(&vertexCount), sizeof(vertexCount));
 		stream.read(reinterpret_cast<char*>(&indexCount), sizeof(indexCount));
+		if (!stream.good() ||
+			vertexCount == 0 || indexCount == 0 ||
+			vertexCount > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+			indexCount > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+			return false;
+		}
+
+		const uint64_t vertexBytes = static_cast<uint64_t>(vertexCount) * sizeof(SimpleVertex);
+		const uint64_t indexBytes = static_cast<uint64_t>(indexCount) * sizeof(unsigned int);
+		const uint64_t payloadBytes = sizeof(mesh.m_localTransform) + vertexBytes + indexBytes;
+		if (vertexBytes > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
+			indexBytes > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
+			!HasRemainingBytes(stream, payloadBytes)) {
+			return false;
+		}
+
+		stream.read(reinterpret_cast<char*>(&mesh.m_localTransform), sizeof(mesh.m_localTransform));
 		if (!stream.good()) {
 			return false;
 		}
@@ -749,13 +1063,19 @@ Model3D::LoadBinaryCache(const std::string& cachePath) {
 		mesh.m_vertex.resize(vertexCount);
 		mesh.m_index.resize(indexCount);
 		if (vertexCount > 0) {
-			stream.read(reinterpret_cast<char*>(mesh.m_vertex.data()), sizeof(SimpleVertex) * vertexCount);
+			stream.read(reinterpret_cast<char*>(mesh.m_vertex.data()), static_cast<std::streamsize>(vertexBytes));
 		}
 		if (indexCount > 0) {
-			stream.read(reinterpret_cast<char*>(mesh.m_index.data()), sizeof(unsigned int) * indexCount);
+			stream.read(reinterpret_cast<char*>(mesh.m_index.data()), static_cast<std::streamsize>(indexBytes));
 		}
 		if (!stream.good()) {
 			return false;
+		}
+
+		for (const unsigned int index : mesh.m_index) {
+			if (index >= vertexCount) {
+				return false;
+			}
 		}
 
 		mesh.m_numVertex = static_cast<int>(vertexCount);
@@ -768,7 +1088,7 @@ Model3D::LoadBinaryCache(const std::string& cachePath) {
 
 	const std::wstring cachePathW(cachePath.begin(), cachePath.end());
 	MESSAGE("ModelLoader", "BinaryCache",
-		L"Loaded binary cache '" << cachePathW << L"'")
+		L"Loaded binary cache '" << cachePathW << L"'");
 	return true;
 }
 
@@ -776,6 +1096,13 @@ bool
 Model3D::SaveBinaryCache(const std::string& cachePath) const {
 	std::ofstream stream(cachePath, std::ios::binary | std::ios::trunc);
 	if (!stream.is_open()) {
+		return false;
+	}
+
+	if (m_meshes.size() > kMaxCachedMeshes ||
+		textureFileNames.size() > kMaxCachedTextures ||
+		m_meshes.size() > std::numeric_limits<uint32_t>::max() ||
+		textureFileNames.size() > std::numeric_limits<uint32_t>::max()) {
 		return false;
 	}
 
@@ -794,20 +1121,42 @@ Model3D::SaveBinaryCache(const std::string& cachePath) const {
 	}
 
 	for (const MeshComponent& mesh : m_meshes) {
-		if (!WriteString(stream, mesh.m_name)) {
+		if (!WriteString(stream, mesh.m_name) || !WriteString(stream, mesh.m_materialName)) {
 			return false;
+		}
+
+		if (mesh.m_vertex.empty() || mesh.m_index.empty() ||
+			mesh.m_vertex.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+			mesh.m_index.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+			mesh.m_vertex.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+			mesh.m_index.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+			return false;
+		}
+
+		for (const unsigned int index : mesh.m_index) {
+			if (index >= mesh.m_vertex.size()) {
+				return false;
+			}
 		}
 
 		const uint32_t vertexCount = static_cast<uint32_t>(mesh.m_vertex.size());
 		const uint32_t indexCount = static_cast<uint32_t>(mesh.m_index.size());
+		const uint64_t vertexBytes = static_cast<uint64_t>(vertexCount) * sizeof(SimpleVertex);
+		const uint64_t indexBytes = static_cast<uint64_t>(indexCount) * sizeof(unsigned int);
+		if (vertexBytes > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
+			indexBytes > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max())) {
+			return false;
+		}
+
 		stream.write(reinterpret_cast<const char*>(&vertexCount), sizeof(vertexCount));
 		stream.write(reinterpret_cast<const char*>(&indexCount), sizeof(indexCount));
+		stream.write(reinterpret_cast<const char*>(&mesh.m_localTransform), sizeof(mesh.m_localTransform));
 
 		if (vertexCount > 0) {
-			stream.write(reinterpret_cast<const char*>(mesh.m_vertex.data()), sizeof(SimpleVertex) * vertexCount);
+			stream.write(reinterpret_cast<const char*>(mesh.m_vertex.data()), static_cast<std::streamsize>(vertexBytes));
 		}
 		if (indexCount > 0) {
-			stream.write(reinterpret_cast<const char*>(mesh.m_index.data()), sizeof(unsigned int) * indexCount);
+			stream.write(reinterpret_cast<const char*>(mesh.m_index.data()), static_cast<std::streamsize>(indexBytes));
 		}
 
 		if (!stream.good()) {

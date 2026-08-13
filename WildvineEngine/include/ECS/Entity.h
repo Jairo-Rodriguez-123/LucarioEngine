@@ -60,7 +60,13 @@ public:
   template <typename T> void 
   addComponent(EU::TSharedPointer<T> component) {
     static_assert(std::is_base_of<Component, T>::value, "T must be derived from Component");
-    m_components.push_back(component.template dynamic_pointer_cast<Component>());
+    if (component.isNull()) {
+      return;
+    }
+    auto baseComponent = component.template dynamic_pointer_cast<Component>();
+    if (!baseComponent.isNull()) {
+      m_components.push_back(baseComponent);
+    }
   }
 
   /**
@@ -81,8 +87,8 @@ public:
   }
 private:
 protected:
-  bool m_isActive;
-  int m_id;
+  bool m_isActive = true;
+  int m_id = -1;
   std::vector<EU::TSharedPointer<Component>> m_components;
 };
 

@@ -33,7 +33,7 @@
 */
 #pragma once
 
-#include "EngineUtilities\Utilities\EngineMath.h"
+#include "EngineUtilities/Utilities/EngineMath.h"
 namespace EU {
 	/**
  * @brief A 3D vector class.
@@ -124,15 +124,9 @@ namespace EU {
 			return Vector3(x / mag, y / mag, z / mag);
 		}
 
-		void
-    zero() {
-      Vector3(0, 0, 0);
-    }
-    
-    void
-    one() {
-      Vector3(1,1,1);
-    }
+		void zero() noexcept { x = 0.0f; y = 0.0f; z = 0.0f; }
+
+		void one() noexcept { x = 1.0f; y = 1.0f; z = 1.0f; }
 
 
 		// ---- helpers con tu Vector3 ----

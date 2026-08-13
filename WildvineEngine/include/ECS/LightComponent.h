@@ -14,7 +14,7 @@ class
 LightComponent : public Component {
 public:
 	LightComponent()
-		: Component(ComponentType::NONE) {}
+		: Component(ComponentType::LIGHT) {}
 
 	void init() override {}
 	void update(float deltaTime) override {}

@@ -19,12 +19,16 @@ public:
    * @brief Constructor por defecto.
    */
   RenderTargetView() = default;
+  RenderTargetView(const RenderTargetView&) = delete;
+  RenderTargetView& operator=(const RenderTargetView&) = delete;
+  RenderTargetView(RenderTargetView&& other) noexcept;
+  RenderTargetView& operator=(RenderTargetView&& other) noexcept;
 
   /**
    * @brief Destructor por defecto.
    * @details No libera automáticamente el recurso COM; llamar a destroy().
    */
-  ~RenderTargetView() = default;
+  ~RenderTargetView();
 
   /**
    * @brief Inicializa el Render Target View desde el back buffer.
@@ -108,6 +112,8 @@ public:
    */
   void 
   destroy();
+
+  ID3D11RenderTargetView* get() const { return m_renderTargetView; }
 private:
   /**
    * @brief Recurso COM de Direct3D 11 para la vista de Render Target.

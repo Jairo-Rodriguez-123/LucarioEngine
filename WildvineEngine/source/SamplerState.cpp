@@ -14,6 +14,8 @@ SamplerState::init(Device& device) {
     return E_POINTER;
   }
 
+  destroy();
+
   D3D11_SAMPLER_DESC sampDesc = {};
   sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
@@ -34,7 +36,7 @@ SamplerState::init(Device& device) {
 
 void 
 SamplerState::update() {
-  // No hay lógica de actualización para un sampler en este caso.
+  // No hay lï¿½gica de actualizaciï¿½n para un sampler en este caso.
 }
 
 void 
@@ -46,14 +48,17 @@ SamplerState::render(DeviceContext& deviceContext,
     return;
   }
 
-  deviceContext.PSSetSamplers(StartSlot, NumSamplers, &m_sampler);
+  // This wrapper owns exactly one sampler. Passing NumSamplers > 1 would make
+  // D3D11 read adjacent memory as if it were an array of sampler pointers.
+  if (NumSamplers == 0) {
+    return;
+  }
+  deviceContext.PSSetSamplers(StartSlot, 1, &m_sampler);
 }
 
 void 
 SamplerState::destroy() {
-  if (m_sampler) {
-    SAFE_RELEASE(m_sampler);
-  }
+  SAFE_RELEASE(m_sampler);
 }
 
 

@@ -26,12 +26,16 @@ public:
    * @brief Constructor por defecto (no crea recursos).
    */
   DepthStencilView() = default;
+  DepthStencilView(const DepthStencilView&) = delete;
+  DepthStencilView& operator=(const DepthStencilView&) = delete;
+  DepthStencilView(DepthStencilView&& other) noexcept;
+  DepthStencilView& operator=(DepthStencilView&& other) noexcept;
 
   /**
    * @brief Destructor por defecto.
    * @details No libera automáticamente; llamar a destroy() explícitamente.
    */
-  ~DepthStencilView() = default;
+  ~DepthStencilView();
 
   /**
    * @brief Inicializa el @c ID3D11DepthStencilView a partir de una textura de profundidad.
@@ -87,6 +91,8 @@ public:
    */
   void 
   destroy();
+
+  ID3D11DepthStencilView* get() const { return m_depthStencilView; }
 
 public:
   /**

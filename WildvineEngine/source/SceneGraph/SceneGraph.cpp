@@ -3,17 +3,18 @@
  * @brief Implementa la logica de SceneGraph dentro del subsistema SceneGraph.
  * @ingroup scenegraph
  */
-#include "SceneGraph\SceneGraph.h"
-#include "SceneGraph\HierarchyComponent.h"
-#include "ECS\Entity.h"
-#include "ECS\Transform.h"
-#include "ECS\LightComponent.h"
-#include "ECS\MeshRendererComponent.h"
+#include "SceneGraph/SceneGraph.h"
+#include "SceneGraph/HierarchyComponent.h"
+#include "ECS/Entity.h"
+#include "ECS/Transform.h"
+#include "ECS/LightComponent.h"
+#include "ECS/MeshRendererComponent.h"
 #include "DeviceContext.h"
 #include "EngineUtilities/Utilities/Camera.h"
 #include "Rendering/Material.h"
 #include "Rendering/MaterialInstance.h"
 #include "Rendering/RenderScene.h"
+#include <cmath>
 
 void SceneGraph::init() {
 	m_entities.clear();
@@ -96,18 +97,21 @@ SceneGraph::removeEntity(Entity* e) {
 
 bool 
 SceneGraph::isAncestor(Entity* possibleAncestor, Entity* node) const {
-	// Recorre hacia arriba desde node: si encuentra possibleAncestor, hay ciclo
+	// Walk upwards from node. The visited set also protects this validation
+	// from a hierarchy that was already corrupted through direct component access.
 	if (!possibleAncestor || !node) return false;
 
-	auto h = node->getComponent<HierarchyComponent>();
-	while (h && h->m_parent)
+	std::unordered_set<Entity*> visited;
+	while (node && visited.insert(node).second)
 	{
-		if (h->m_parent == possibleAncestor) return true;
+		auto h = node->getComponent<HierarchyComponent>();
+		if (!h || !h->m_parent) {
+			return false;
+		}
+		if (h->m_parent == possibleAncestor) {
+			return true;
+		}
 		node = h->m_parent;
-		EU::TSharedPointer<HierarchyComponent> h;
-		if (node)
-			h = node->getComponent<HierarchyComponent>();
-
 	}
 	return false;
 }
@@ -131,7 +135,7 @@ SceneGraph::attach(Entity* child, Entity* parent)
 	if (!child || !parent) return false;
 	if (child == parent) return false;
 
-	// Registro automático
+	// Registro automï¿½tico
 	addEntity(child);
 	addEntity(parent);
 
@@ -173,40 +177,51 @@ SceneGraph::detach(Entity* child) {
 
 void
 SceneGraph::update(float deltaTime, DeviceContext& deviceContext) {
-	// Actualiza todas las entidades
+	// Actualiza todas las entidades.
 	for (Entity* e : m_entities)
 	{
 		if (!e) continue;
 		e->update(deltaTime, deviceContext);
 	}
 
-	// 2) Propagación World: procesa roots
+	// Propaga las matrices world desde los roots. visited protege contra
+	// ciclos incluso si alguien modifica HierarchyComponent directamente.
+	std::unordered_set<Entity*> visited;
 	for (Entity* e : m_entities)
 	{
-		if (!e) continue;
-		if (isRoot(e))
+		if (e && isRoot(e))
 		{
-			updateWorldRecursive(e, XMMatrixIdentity());
+			updateWorldRecursive(e, XMMatrixIdentity(), visited);
+		}
+	}
+
+	// Una jerarquia corrupta puede no tener root. Procesar cualquier entidad
+	// restante desde identidad evita matrices world obsoletas y recursion infinita.
+	for (Entity* e : m_entities) {
+		if (e && visited.find(e) == visited.end()) {
+			updateWorldRecursive(e, XMMatrixIdentity(), visited);
 		}
 	}
 }
 
-void 
-SceneGraph::updateWorldRecursive(Entity* node, const XMMATRIX& parentWorld) {
-	auto t = node->getComponent<Transform>();
-	// Dirty Matrix?
-	auto h = node->getComponent<HierarchyComponent>();
+void
+SceneGraph::updateWorldRecursive(Entity* node, const XMMATRIX& parentWorld, std::unordered_set<Entity*>& visited) {
+	if (!node || !isRegistered(node) || !visited.insert(node).second) {
+		return;
+	}
 
+	auto t = node->getComponent<Transform>();
+	auto h = node->getComponent<HierarchyComponent>();
 	if (!t || !h) {
 		return;
 	}
-	// Tu Transform::matrix es LOCAL (S*R*T)
-	// World = Local * ParentWorld
-	auto worldMatrix = t->matrix * parentWorld;
+
+	// Transform::matrix es LOCAL (S*R*T). World = Local * ParentWorld.
+	const XMMATRIX worldMatrix = t->matrix * parentWorld;
 	t->worldMatrix = worldMatrix;
 
 	for (Entity* c : h->m_children) {
-			updateWorldRecursive(c, worldMatrix);
+		updateWorldRecursive(c, worldMatrix, visited);
 	}
 }
 
@@ -221,19 +236,39 @@ void SceneGraph::render(DeviceContext& deviceContext) {
 
 void
 SceneGraph::gatherRenderScene(RenderScene& outScene, const Camera& camera) {
+	outScene.clear();
 	for (Entity* entity : m_entities)
 	{
 		if (!entity) {
 			continue;
 		}
 
+		auto transform = entity->getComponent<Transform>();
 		auto lightComponent = entity->getComponent<LightComponent>();
 		if (lightComponent) {
-			outScene.directionalLights.push_back(lightComponent->getLightData());
+			LightData light = lightComponent->getLightData();
+			light.castShadow = lightComponent->canCastShadow();
+			if (light.type == LightType::Directional || light.type == LightType::Spot) {
+				const float dirLengthSq = light.direction.x * light.direction.x +
+					light.direction.y * light.direction.y +
+					light.direction.z * light.direction.z;
+				if (!std::isfinite(dirLengthSq) || dirLengthSq <= 1e-12f) {
+					light.direction = EU::Vector3(0.0f, -1.0f, 0.0f);
+				}
+				else {
+					const float invLength = 1.0f / std::sqrt(dirLengthSq);
+					light.direction = light.direction * invLength;
+				}
+			}
+			if (transform) {
+				XMFLOAT4X4 lightWorld{};
+				XMStoreFloat4x4(&lightWorld, transform->worldMatrix);
+				light.position = EU::Vector3(lightWorld._41, lightWorld._42, lightWorld._43);
+			}
+			outScene.directionalLights.push_back(light);
 		}
 
 		auto meshRenderer = entity->getComponent<MeshRendererComponent>();
-		auto transform = entity->getComponent<Transform>();
 		if (!meshRenderer || !transform || !meshRenderer->isVisible()) {
 			continue;
 		}
@@ -245,27 +280,56 @@ SceneGraph::gatherRenderScene(RenderScene& outScene, const Camera& camera) {
 		renderObject.world = transform->worldMatrix;
 		renderObject.castShadow = meshRenderer->canCastShadow();
 
+		if (!renderObject.mesh) {
+			continue;
+		}
+
 		EU::Vector3 cameraPos = camera.getPosition();
 		XMFLOAT4X4 worldMatrix{};
 		XMStoreFloat4x4(&worldMatrix, transform->worldMatrix);
-		EU::Vector3 objectPos = EU::Vector3(worldMatrix._41, worldMatrix._42, worldMatrix._43);
+		EU::Vector3 objectPos(worldMatrix._41, worldMatrix._42, worldMatrix._43);
 		float dx = objectPos.x - cameraPos.x;
 		float dy = objectPos.y - cameraPos.y;
 		float dz = objectPos.z - cameraPos.z;
 		renderObject.distanceToCamera = dx * dx + dy * dy + dz * dz;
 
-		MaterialDomain domain = MaterialDomain::Opaque;
-		if (renderObject.materialInstance &&
-			renderObject.materialInstance->getMaterial()) {
-			domain = renderObject.materialInstance->getMaterial()->getDomain();
-		}
+		bool hasOpaque = false;
+		bool hasTransparent = false;
+		auto classifyMaterial = [&](MaterialInstance* instance) {
+			if (!instance || !instance->getMaterial()) {
+				return;
+			}
+			if (instance->getMaterial()->getDomain() == MaterialDomain::Transparent) {
+				hasTransparent = true;
+			}
+			else {
+				hasOpaque = true;
+			}
+		};
 
-		renderObject.transparent = (domain == MaterialDomain::Transparent);
-		if (renderObject.transparent) {
-			outScene.transparentObjects.push_back(renderObject);
+		if (!renderObject.materialInstances.empty()) {
+			for (MaterialInstance* instance : renderObject.materialInstances) {
+				classifyMaterial(instance);
+			}
 		}
 		else {
-			outScene.opaqueObjects.push_back(renderObject);
+			classifyMaterial(renderObject.materialInstance);
+		}
+
+		// No usable material means there is nothing this renderer can draw.
+		if (!hasOpaque && !hasTransparent) {
+			continue;
+		}
+
+		if (hasOpaque) {
+			RenderObject opaqueObject = renderObject;
+			opaqueObject.transparent = false;
+			outScene.opaqueObjects.push_back(std::move(opaqueObject));
+		}
+		if (hasTransparent) {
+			RenderObject transparentObject = renderObject;
+			transparentObject.transparent = true;
+			outScene.transparentObjects.push_back(std::move(transparentObject));
 		}
 	}
 }

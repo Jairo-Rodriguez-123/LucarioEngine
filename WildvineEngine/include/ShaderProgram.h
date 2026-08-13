@@ -13,11 +13,11 @@ class LayoutBuilder;
 
 /**
  * @class ShaderProgram
- * @brief Encapsula la creación, compilación y uso de Vertex Shader y Pixel Shader en Direct3D 11.
+ * @brief Encapsula la creaciï¿½n, compilaciï¿½n y uso de Vertex Shader y Pixel Shader en Direct3D 11.
  *
  * Esta clase administra el ciclo de vida de un conjunto de shaders (VS y PS),
- * incluyendo su compilación desde archivo, creación en el dispositivo y vinculación
- * al pipeline. Además, maneja el Input Layout asociado al Vertex Shader.
+ * incluyendo su compilaciï¿½n desde archivo, creaciï¿½n en el dispositivo y vinculaciï¿½n
+ * al pipeline. Ademï¿½s, maneja el Input Layout asociado al Vertex Shader.
  */
 class 
 ShaderProgram {
@@ -29,33 +29,36 @@ public:
 
   /**
    * @brief Destructor por defecto.
-   * @details No libera automáticamente los recursos COM; llamar a destroy().
+   * @details No libera automï¿½ticamente los recursos COM; llamar a destroy().
    */
-  ~ShaderProgram() = default;
+  ~ShaderProgram() { destroy(); }
+
+  ShaderProgram(const ShaderProgram&) = delete;
+  ShaderProgram& operator=(const ShaderProgram&) = delete;
 
   /**
    * @brief Inicializa el programa de shaders desde un archivo HLSL.
    *
    * Compila y crea los shaders (VS y PS) definidos en el archivo indicado,
-   * además de crear el Input Layout con la descripción proporcionada.
+   * ademï¿½s de crear el Input Layout con la descripciï¿½n proporcionada.
    *
-   * @param device   Dispositivo con el que se crearán los recursos.
+   * @param device   Dispositivo con el que se crearï¿½n los recursos.
    * @param fileName Nombre del archivo HLSL que contiene los shaders.
-   * @param Layout   Vector con la descripción de los elementos de entrada (para VS).
-   * @return @c S_OK si fue exitoso; código @c HRESULT en caso de error.
+   * @param Layout   Vector con la descripciï¿½n de los elementos de entrada (para VS).
+   * @return @c S_OK si fue exitoso; cï¿½digo @c HRESULT en caso de error.
    *
-   * @post Si retorna @c S_OK, los punteros a shaders y el input layout serán válidos.
+   * @post Si retorna @c S_OK, los punteros a shaders y el input layout serï¿½n vï¿½lidos.
    */
   HRESULT 
-  init(Device& device, const std::string& fileName, LayoutBuilder layoutBuilder);
+  init(Device& device, const std::string& fileName, const LayoutBuilder& layoutBuilder);
 
   /**
-   * @brief Actualiza parámetros internos de los shaders.
+   * @brief Actualiza parï¿½metros internos de los shaders.
    *
-   * Método de marcador para futuras extensiones (por ejemplo,
+   * Mï¿½todo de marcador para futuras extensiones (por ejemplo,
    * recompilar shaders en caliente).
    *
-   * @note Actualmente no realiza ninguna operación.
+   * @note Actualmente no realiza ninguna operaciï¿½n.
    */
   void
   update();
@@ -66,7 +69,7 @@ public:
    * Llama a @c VSSetShader, @c PSSetShader y asigna el input layout
    * al contexto.
    *
-   * @param deviceContext Contexto donde se aplicará el programa de shaders.
+   * @param deviceContext Contexto donde se aplicarï¿½ el programa de shaders.
    *
    * @pre Los shaders deben haberse creado con init() o CreateShader().
    */
@@ -74,12 +77,12 @@ public:
   render(DeviceContext& deviceContext);
 
   /**
-   * @brief Aplica únicamente un shader específico al pipeline.
+   * @brief Aplica ï¿½nicamente un shader especï¿½fico al pipeline.
    *
    * Permite vincular solo el Vertex Shader o solo el Pixel Shader,
-   * según el parámetro @p type.
+   * segï¿½n el parï¿½metro @p type.
    *
-   * @param deviceContext Contexto donde se aplicará el shader.
+   * @param deviceContext Contexto donde se aplicarï¿½ el shader.
    * @param type          Tipo de shader a establecer (VS o PS).
    */
   void 
@@ -97,19 +100,19 @@ public:
   /**
    * @brief Crea un Input Layout asociado al Vertex Shader.
    *
-   * @param device Dispositivo con el que se creará el recurso.
-   * @param Layout Descripción de los elementos de entrada.
-   * @return @c S_OK si fue exitoso; código @c HRESULT en caso de error.
+   * @param device Dispositivo con el que se crearï¿½ el recurso.
+   * @param Layout Descripciï¿½n de los elementos de entrada.
+   * @return @c S_OK si fue exitoso; cï¿½digo @c HRESULT en caso de error.
    */
   HRESULT 
-  CreateInputLayout(Device& device, LayoutBuilder);
+  CreateInputLayout(Device& device, const LayoutBuilder& layoutBuilder);
 
   /**
    * @brief Crea un shader (Vertex o Pixel) a partir del archivo establecido en @c m_shaderFileName.
    *
-   * @param device Dispositivo con el que se creará el recurso.
+   * @param device Dispositivo con el que se crearï¿½ el recurso.
    * @param type   Tipo de shader a crear.
-   * @return @c S_OK si fue exitoso; código @c HRESULT en caso de error.
+   * @return @c S_OK si fue exitoso; cï¿½digo @c HRESULT en caso de error.
    */
   HRESULT 
   CreateShader(Device& device, ShaderType type);
@@ -117,10 +120,10 @@ public:
   /**
    * @brief Crea un shader (Vertex o Pixel) a partir de un archivo HLSL.
    *
-   * @param device   Dispositivo con el que se creará el recurso.
+   * @param device   Dispositivo con el que se crearï¿½ el recurso.
    * @param type     Tipo de shader a crear.
    * @param fileName Nombre del archivo HLSL.
-   * @return @c S_OK si fue exitoso; código @c HRESULT en caso de error.
+   * @return @c S_OK si fue exitoso; cï¿½digo @c HRESULT en caso de error.
    */
   HRESULT 
   CreateShader(Device& device, ShaderType type, const std::string& fileName);
@@ -129,16 +132,16 @@ public:
    * @brief Compila un shader desde archivo.
    *
    * Llama internamente a @c D3DCompileFromFile para obtener el bytecode
-   * de un shader en función de su punto de entrada y modelo.
+   * de un shader en funciï¿½n de su punto de entrada y modelo.
    *
    * @param szFileName   Ruta del archivo HLSL.
-   * @param szEntryPoint Punto de entrada de la función shader (ej. "VSMain").
+   * @param szEntryPoint Punto de entrada de la funciï¿½n shader (ej. "VSMain").
    * @param szShaderModel Modelo de shader (ej. "vs_5_0", "ps_5_0").
    * @param ppBlobOut    Salida con el bytecode compilado.
-   * @return @c S_OK si fue exitoso; código @c HRESULT en caso de error.
+   * @return @c S_OK si fue exitoso; cï¿½digo @c HRESULT en caso de error.
    */
   HRESULT 
-  CompileShaderFromFile(char* szFileName,
+  CompileShaderFromFile(const char* szFileName,
                         LPCSTR szEntryPoint,
                         LPCSTR szShaderModel,
                         ID3DBlob** ppBlobOut);

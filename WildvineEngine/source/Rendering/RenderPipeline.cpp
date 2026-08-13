@@ -2,10 +2,13 @@
 
 HRESULT
 RenderPipeline::init(Device& device, RendererType initialRenderer) {
+	destroy();
 	m_activeRenderer = nullptr;
 	m_activeRendererType = initialRenderer;
 	m_forwardInitialized = false;
 	m_deferredInitialized = false;
+	m_lastWidth = 1280;
+	m_lastHeight = 720;
 	return setRendererType(initialRenderer, device);
 }
 
@@ -16,21 +19,39 @@ RenderPipeline::setRendererType(RendererType rendererType, Device& device) {
 		return hr;
 	}
 
-	m_activeRendererType = rendererType;
-	m_activeRenderer = resolveRenderer(rendererType);
-
-	if (m_activeRenderer) {
-		MESSAGE("RenderPipeline", "setRendererType", m_activeRenderer->getDebugName());
+	ISceneRenderer* candidateRenderer = resolveRenderer(rendererType);
+	if (!candidateRenderer) {
+		return E_FAIL;
 	}
 
-	return m_activeRenderer ? S_OK : E_FAIL;
+	hr = candidateRenderer->resize(device, m_lastWidth, m_lastHeight);
+	if (FAILED(hr)) {
+		return hr;
+	}
+
+	m_activeRendererType = rendererType;
+	m_activeRenderer = candidateRenderer;
+	MESSAGE("RenderPipeline", "setRendererType", m_activeRenderer->getDebugName());
+	return S_OK;
 }
 
-void
+HRESULT
 RenderPipeline::resize(Device& device, unsigned int width, unsigned int height) {
-	if (m_activeRenderer) {
-		m_activeRenderer->resize(device, width, height);
+	if (width == 0 || height == 0) {
+		return E_INVALIDARG;
 	}
+	if (!m_activeRenderer) {
+		return E_UNEXPECTED;
+	}
+
+	const HRESULT hr = m_activeRenderer->resize(device, width, height);
+	if (FAILED(hr)) {
+		return hr;
+	}
+
+	m_lastWidth = width;
+	m_lastHeight = height;
+	return S_OK;
 }
 
 void
@@ -56,47 +77,49 @@ RenderPipeline::destroy() {
 	}
 
 	m_activeRenderer = nullptr;
+	m_lastWidth = 1280;
+	m_lastHeight = 720;
 }
 
 const char*
 RenderPipeline::getActiveRendererName() const {
-	const ISceneRenderer* renderer = resolveRenderer(m_activeRendererType);
+	const ISceneRenderer* renderer = m_activeRenderer;
 	return renderer ? renderer->getDebugName() : "NoRenderer";
 }
 
 ID3D11ShaderResourceView*
 RenderPipeline::getShadowMapSRV() const {
-	const ISceneRenderer* renderer = resolveRenderer(m_activeRendererType);
+	const ISceneRenderer* renderer = m_activeRenderer;
 	return renderer ? renderer->getShadowMapSRV() : nullptr;
 }
 
 ID3D11ShaderResourceView*
 RenderPipeline::getPreShadowSRV() const {
-	const ISceneRenderer* renderer = resolveRenderer(m_activeRendererType);
+	const ISceneRenderer* renderer = m_activeRenderer;
 	return renderer ? renderer->getPreShadowSRV() : nullptr;
 }
 
 ID3D11ShaderResourceView*
 RenderPipeline::getGBufferAlbedoMetallicSRV() const {
-	const ISceneRenderer* renderer = resolveRenderer(m_activeRendererType);
+	const ISceneRenderer* renderer = m_activeRenderer;
 	return renderer ? renderer->getGBufferAlbedoMetallicSRV() : nullptr;
 }
 
 ID3D11ShaderResourceView*
 RenderPipeline::getGBufferNormalRoughnessSRV() const {
-	const ISceneRenderer* renderer = resolveRenderer(m_activeRendererType);
+	const ISceneRenderer* renderer = m_activeRenderer;
 	return renderer ? renderer->getGBufferNormalRoughnessSRV() : nullptr;
 }
 
 ID3D11ShaderResourceView*
 RenderPipeline::getGBufferWorldAoSRV() const {
-	const ISceneRenderer* renderer = resolveRenderer(m_activeRendererType);
+	const ISceneRenderer* renderer = m_activeRenderer;
 	return renderer ? renderer->getGBufferWorldAoSRV() : nullptr;
 }
 
 ID3D11ShaderResourceView*
 RenderPipeline::getGBufferEmissiveAlphaSRV() const {
-	const ISceneRenderer* renderer = resolveRenderer(m_activeRendererType);
+	const ISceneRenderer* renderer = m_activeRenderer;
 	return renderer ? renderer->getGBufferEmissiveAlphaSRV() : nullptr;
 }
 
@@ -123,6 +146,7 @@ RenderPipeline::ensureRendererInitialized(RendererType rendererType, Device& dev
 		if (!m_forwardInitialized) {
 			HRESULT hr = m_forwardRenderer.init(device);
 			if (FAILED(hr)) {
+				m_forwardRenderer.destroy();
 				return hr;
 			}
 			m_forwardInitialized = true;
@@ -132,6 +156,7 @@ RenderPipeline::ensureRendererInitialized(RendererType rendererType, Device& dev
 		if (!m_deferredInitialized) {
 			HRESULT hr = m_deferredRenderer.init(device);
 			if (FAILED(hr)) {
+				m_deferredRenderer.destroy();
 				return hr;
 			}
 			m_deferredInitialized = true;
@@ -145,8 +170,8 @@ RenderPipeline::ensureRendererInitialized(RendererType rendererType, Device& dev
 ISceneRenderer*
 RenderPipeline::resolveRenderer(RendererType rendererType) {
 	switch (rendererType) {
-		//case RendererType::Forward:
-		//	return &m_forwardRenderer;
+	case RendererType::Forward:
+		return &m_forwardRenderer;
 	case RendererType::Deferred:
 		return &m_deferredRenderer;
 	default:
@@ -157,8 +182,8 @@ RenderPipeline::resolveRenderer(RendererType rendererType) {
 const ISceneRenderer*
 RenderPipeline::resolveRenderer(RendererType rendererType) const {
 	switch (rendererType) {
-		//case RendererType::Forward:
-		//	return &m_forwardRenderer;
+	case RendererType::Forward:
+		return &m_forwardRenderer;
 	case RendererType::Deferred:
 		return &m_deferredRenderer;
 	default:

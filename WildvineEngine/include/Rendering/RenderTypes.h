@@ -150,6 +150,13 @@ LightData {
 	  *  @brief Spot light cone angle (in degrees or radians as used by the engine).
 	 */
 	float spotAngle = 0.0f;
+	 /*
+	  *  @brief Whether this light is allowed to generate the scene shadow map.
+	  *
+	  *  This is CPU-side render metadata; it is copied from LightComponent and is
+	  *  intentionally not packed into CBPerFrame.
+	 */
+	bool castShadow = false;
 };
 
  /*
@@ -239,15 +246,15 @@ CBPerFrame {
   /*
    *  @brief Array of light positions and ranges packed in XMFLOAT4 for shaders.
   */
-  XMFLOAT4 LigthPositionsRanges[kMaxSceneLights]{};
+  XMFLOAT4 LightPositionsRanges[kMaxSceneLights]{};
   /*
    *  @brief Array of light colors and types packed in XMFLOAT4 for shaders.
   */
-  XMFLOAT4 LigthColorsTypes[kMaxSceneLights]{};
+  XMFLOAT4 LightColorsTypes[kMaxSceneLights]{};
   /*
    *  @brief Array of light colors and intensities packed in XMFLOAT4 for shaders.
   */
-  XMFLOAT4 LightColorsIntensities[kMaxSceneLights]{};
+  XMFLOAT4 LightDirectionsIntensities[kMaxSceneLights]{};
   /*
    *  @brief Current number of active lights in the scene.
   */
@@ -327,6 +334,10 @@ CBPerMaterial {
 	 */
 	float pad5 = 0.0f;
 };
+
+static_assert((sizeof(CBPerFrame) % 16) == 0, "CBPerFrame must be a multiple of 16 bytes");
+static_assert((sizeof(CBPerObject) % 16) == 0, "CBPerObject must be a multiple of 16 bytes");
+static_assert((sizeof(CBPerMaterial) % 16) == 0, "CBPerMaterial must be a multiple of 16 bytes");
 
  /*
   *  @brief Represents a renderable object with mesh, materials and rendering flags.

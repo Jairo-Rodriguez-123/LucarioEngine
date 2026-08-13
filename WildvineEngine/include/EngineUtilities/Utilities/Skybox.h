@@ -12,8 +12,8 @@
 #include "Model3D.h"
 #include "RasterizerState.h"
 #include "DepthStencilState.h"
-#include "EngineUtilities\Utilities\Camera.h"
-#include "ECS\Actor.h"
+#include "EngineUtilities/Utilities/Camera.h"
+#include "ECS/Actor.h"
 
 class Device;
 class DeviceContext;
@@ -22,7 +22,7 @@ class
 Skybox {
 public:
 	Skybox()  = default;
-	~Skybox() = default;
+	~Skybox() { destroy(); }
 
 	HRESULT 
 	init(Device& device, DeviceContext* deviceContext, Texture& cubemap);
@@ -34,7 +34,7 @@ public:
 	render(DeviceContext& deviceContext);
 
 	void
-	destroy() {}
+	destroy();
 
 private:
 	ShaderProgram m_shaderProgram;

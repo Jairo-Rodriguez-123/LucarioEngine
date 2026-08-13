@@ -23,7 +23,7 @@ public:
 	*/
 	std::vector<RenderObject> transparentObjects;  
 	/*
-		*  @brief Collection of directional lights affecting the scene.
+		*  @brief Collection of all scene lights. The legacy member name is kept for API compatibility.
 	*/
 	std::vector<LightData> directionalLights;      
 	/*

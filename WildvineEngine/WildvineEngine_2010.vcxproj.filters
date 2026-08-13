@@ -161,10 +161,10 @@
     <ClCompile Include="source\EditorViewportPass.cpp">
       <Filter>source</Filter>
     </ClCompile>
-    <ClCompile Include="source\Rendering\DefferredRenderer.cpp">
+    <ClCompile Include="source\Rendering\RenderPipeline.cpp">
       <Filter>source\Rendering</Filter>
     </ClCompile>
-    <ClCompile Include="source\Rendering\RenderPipeline.cpp">
+    <ClCompile Include="source\Rendering\DeferredRenderer.cpp">
       <Filter>source\Rendering</Filter>
     </ClCompile>
   </ItemGroup>

@@ -6,6 +6,7 @@
 #include "Rendering/ForwardRenderer.h"
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include "Device.h"
 #include "DeviceContext.h"
 #include "Rendering/Material.h"
@@ -17,8 +18,40 @@
 #include "EngineUtilities/Utilities/LayoutBuilder.h"
 #include "EngineUtilities/Utilities/Skybox.h"
 
+namespace {
+	const LightData* findPrimaryForwardLight(const RenderScene& scene) {
+		for (const LightData& light : scene.directionalLights) {
+			if (light.type == LightType::Directional) {
+				return &light;
+			}
+		}
+		return scene.directionalLights.empty() ? nullptr : &scene.directionalLights.front();
+	}
+
+	const LightData* findPrimaryShadowLight(const RenderScene& scene) {
+		for (const LightData& light : scene.directionalLights) {
+			if (light.type == LightType::Directional && light.castShadow) {
+				return &light;
+			}
+		}
+		return nullptr;
+	}
+
+	void writeForwardLight(CBPerFrame& buffer, int lightIndex, const LightData& light) {
+		if (lightIndex < 0 || lightIndex >= kMaxSceneLights) {
+			return;
+		}
+		const float range = light.range > 0.0f ? light.range : 10.0f;
+		const EU::Vector3 lightColor = light.color * light.intensity;
+		buffer.LightPositionsRanges[lightIndex] = XMFLOAT4(light.position.x, light.position.y, light.position.z, range);
+		buffer.LightColorsTypes[lightIndex] = XMFLOAT4(lightColor.x, lightColor.y, lightColor.z, static_cast<float>(static_cast<int>(light.type)));
+		buffer.LightDirectionsIntensities[lightIndex] = XMFLOAT4(light.direction.x, light.direction.y, light.direction.z, light.intensity);
+	}
+}
+
 HRESULT
 ForwardRenderer::init(Device& device) {
+	destroy();
 	HRESULT hr = m_perFrameBuffer.init(device, sizeof(CBPerFrame));
 	if (FAILED(hr)) {
 		return hr;
@@ -42,6 +75,14 @@ ForwardRenderer::init(Device& device) {
 		return hr;
 	}
 
+	hr = m_shadowDepthStencil.init(device,
+		true,
+		D3D11_DEPTH_WRITE_MASK_ALL,
+		D3D11_COMPARISON_LESS);
+	if (FAILED(hr)) {
+		return hr;
+	}
+
 	hr = createShadowResources(device);
 	if (FAILED(hr)) {
 		return hr;
@@ -60,9 +101,17 @@ ForwardRenderer::init(Device& device) {
 	return S_OK;
 }
 
-void
+HRESULT
 ForwardRenderer::resize(Device& device, unsigned int width, unsigned int height) {
-	m_preShadowDebugPass.resize(device, width, height);
+	if (width == 0 || height == 0) {
+		return E_INVALIDARG;
+	}
+	const HRESULT hr = m_preShadowDebugPass.resize(device, width, height);
+	if (FAILED(hr)) {
+		ERROR("ForwardRenderer", "resize", "Failed to resize pre-shadow debug pass.");
+		return hr;
+	}
+	return S_OK;
 }
 
 void
@@ -75,11 +124,33 @@ ForwardRenderer::updatePerFrame(const Camera& camera,
 	m_cbPerFrame.CameraPos = camera.getPosition();
 	m_cbPerFrame.LightDir = EU::Vector3(0.0f, -1.0f, 0.0f);
 	m_cbPerFrame.LightColor = EU::Vector3(1.0f, 1.0f, 1.0f);
+	m_cbPerFrame.LightPosition = EU::Vector3(0.0f, 3.0f, 0.0f);
+	m_cbPerFrame.LightRange = 10.0f;
+	m_cbPerFrame.LightType = static_cast<int>(LightType::Directional);
+	m_cbPerFrame.LightCount = 0;
 
-	if (!scene.directionalLights.empty()) {
-		const LightData& mainLight = scene.directionalLights.front();
-		m_cbPerFrame.LightDir = mainLight.direction;
-		m_cbPerFrame.LightColor = mainLight.color * mainLight.intensity;
+	for (int lightIndex = 0; lightIndex < kMaxSceneLights; ++lightIndex) {
+		m_cbPerFrame.LightPositionsRanges[lightIndex] = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+		m_cbPerFrame.LightColorsTypes[lightIndex] = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+		m_cbPerFrame.LightDirectionsIntensities[lightIndex] = XMFLOAT4(0.0f, -1.0f, 0.0f, 0.0f);
+	}
+
+	const LightData* primaryLight = findPrimaryForwardLight(scene);
+	if (primaryLight) {
+		int lightCount = 0;
+		writeForwardLight(m_cbPerFrame, lightCount++, *primaryLight);
+		for (const LightData& light : scene.directionalLights) {
+			if (&light == primaryLight || lightCount >= kMaxSceneLights) {
+				continue;
+			}
+			writeForwardLight(m_cbPerFrame, lightCount++, light);
+		}
+		m_cbPerFrame.LightCount = lightCount;
+		m_cbPerFrame.LightDir = primaryLight->direction;
+		m_cbPerFrame.LightColor = primaryLight->color * primaryLight->intensity;
+		m_cbPerFrame.LightPosition = primaryLight->position;
+		m_cbPerFrame.LightRange = primaryLight->range > 0.0f ? primaryLight->range : 10.0f;
+		m_cbPerFrame.LightType = static_cast<int>(primaryLight->type);
 	}
 
 	m_perFrameBuffer.update(deviceContext, nullptr, 0, nullptr, &m_cbPerFrame, 0, 0);
@@ -114,6 +185,7 @@ ForwardRenderer::destroy() {
 	SAFE_RELEASE(m_additiveBlendState);
 	SAFE_RELEASE(m_premultipliedBlendState);
 	m_transparentDepthStencil.destroy();
+	m_shadowDepthStencil.destroy();
 	m_perMaterialBuffer.destroy();
 	m_perObjectBuffer.destroy();
 	m_perFrameBuffer.destroy();
@@ -142,7 +214,7 @@ ForwardRenderer::buildQueues(RenderScene& scene, const Camera& camera) {
 	std::sort(m_opaqueQueue.begin(), m_opaqueQueue.end(),
 		[](const RenderObject* lhs, const RenderObject* rhs) {
 			if (lhs->materialInstance != rhs->materialInstance) {
-				return lhs->materialInstance < rhs->materialInstance;
+				return std::less<MaterialInstance*>{}(lhs->materialInstance, rhs->materialInstance);
 			}
 			return lhs->distanceToCamera < rhs->distanceToCamera;
 		});
@@ -163,6 +235,9 @@ ForwardRenderer::renderShadowPass(DeviceContext& deviceContext) {
 	deviceContext.PSSetShaderResources(6, 1, nullShadowSRV);
 	deviceContext.OMSetRenderTargets(0, nullptr, m_shadowDSV.m_depthStencilView);
 	deviceContext.ClearDepthStencilView(m_shadowDSV.m_depthStencilView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+	if (!m_hasShadowCastingLight) {
+		return;
+	}
 
 	D3D11_VIEWPORT shadowViewport{};
 	shadowViewport.TopLeftX = 0.0f;
@@ -174,6 +249,7 @@ ForwardRenderer::renderShadowPass(DeviceContext& deviceContext) {
 	deviceContext.RSSetViewports(1, &shadowViewport);
 
 	m_shadowRasterizer.render(deviceContext);
+	m_shadowDepthStencil.render(deviceContext, 0, false);
 	m_perFrameBuffer.render(deviceContext, 0, 1, false);
 
 	for (const RenderObject* object : m_opaqueQueue) {
@@ -202,13 +278,13 @@ ForwardRenderer::renderPreShadowDebugPass(DeviceContext& deviceContext, RenderSc
 	renderOpaquePass(deviceContext);
 	renderTransparentPass(deviceContext);
 
-	m_applyShadows = true;
+	m_applyShadows = m_hasShadowCastingLight;
 }
 
 void
 ForwardRenderer::renderOpaquePass(DeviceContext& deviceContext) {
 	m_perFrameBuffer.render(deviceContext, 0, 1, true);
-	if (m_applyShadows && m_shadowDepthSRV.m_textureFromImg) {
+	if (m_applyShadows && m_hasShadowCastingLight && m_shadowDepthSRV.m_textureFromImg) {
 		deviceContext.PSSetShaderResources(6, 1, &m_shadowDepthSRV.m_textureFromImg);
 	}
 	else {
@@ -228,7 +304,7 @@ ForwardRenderer::renderOpaquePass(DeviceContext& deviceContext) {
 void
 ForwardRenderer::renderTransparentPass(DeviceContext& deviceContext) {
 	m_perFrameBuffer.render(deviceContext, 0, 1, true);
-	if (m_applyShadows && m_shadowDepthSRV.m_textureFromImg) {
+	if (m_applyShadows && m_hasShadowCastingLight && m_shadowDepthSRV.m_textureFromImg) {
 		deviceContext.PSSetShaderResources(6, 1, &m_shadowDepthSRV.m_textureFromImg);
 	}
 	else {
@@ -264,10 +340,6 @@ ForwardRenderer::renderObject(DeviceContext& deviceContext,
 		return;
 	}
 
-	XMStoreFloat4x4(&m_cbPerObject.World, XMMatrixTranspose(object.world));
-	m_perObjectBuffer.update(deviceContext, nullptr, 0, nullptr, &m_cbPerObject, 0, 0);
-	m_perObjectBuffer.render(deviceContext, 1, 1, true);
-
 	deviceContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	std::vector<Submesh>& submeshes = object.mesh->getSubmeshes();
@@ -282,9 +354,21 @@ ForwardRenderer::renderObject(DeviceContext& deviceContext,
 			continue;
 		}
 
+		XMMATRIX submeshWorld = XMLoadFloat4x4(&submesh.localTransform) * object.world;
+		XMStoreFloat4x4(&m_cbPerObject.World, XMMatrixTranspose(submeshWorld));
+		m_perObjectBuffer.update(deviceContext, nullptr, 0, nullptr, &m_cbPerObject, 0, 0);
+		m_perObjectBuffer.render(deviceContext, 1, 1, true);
+
 		Material* material = materialInstance->getMaterial();
 		if (!material) {
 			continue;
+		}
+		const bool materialIsTransparent = material->getDomain() == MaterialDomain::Transparent;
+		if ((passType == RenderPassType::Transparent) != materialIsTransparent) {
+			continue;
+		}
+		if (materialIsTransparent) {
+			deviceContext.OMSetBlendState(resolveBlendState(material), m_blendFactor, 0xffffffff);
 		}
 
 		if (material->getRasterizerState()) {
@@ -334,16 +418,26 @@ ForwardRenderer::renderShadowObject(DeviceContext& deviceContext, const RenderOb
 		return;
 	}
 
-	XMStoreFloat4x4(&m_cbPerObject.World, XMMatrixTranspose(object.world));
-	m_perObjectBuffer.update(deviceContext, nullptr, 0, nullptr, &m_cbPerObject, 0, 0);
-	m_perObjectBuffer.render(deviceContext, 1, 1, false);
-
 	m_shadowShader.render(deviceContext);
-	deviceContext.m_deviceContext->PSSetShader(nullptr, nullptr, 0);
+	deviceContext.PSSetShader(nullptr, nullptr, 0);
 	deviceContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	std::vector<Submesh>& submeshes = object.mesh->getSubmeshes();
 	for (Submesh& submesh : submeshes) {
+		MaterialInstance* materialInstance = object.materialInstance;
+		if (submesh.materialSlot < object.materialInstances.size() &&
+			object.materialInstances[submesh.materialSlot]) {
+			materialInstance = object.materialInstances[submesh.materialSlot];
+		}
+		Material* material = materialInstance ? materialInstance->getMaterial() : nullptr;
+		if (material && material->getDomain() == MaterialDomain::Transparent) {
+			continue;
+		}
+
+		XMMATRIX submeshWorld = XMLoadFloat4x4(&submesh.localTransform) * object.world;
+		XMStoreFloat4x4(&m_cbPerObject.World, XMMatrixTranspose(submeshWorld));
+		m_perObjectBuffer.update(deviceContext, nullptr, 0, nullptr, &m_cbPerObject, 0, 0);
+		m_perObjectBuffer.render(deviceContext, 1, 1, false);
 		submesh.vertexBuffer.render(deviceContext, 0, 1);
 		submesh.indexBuffer.render(deviceContext, 0, 1, false, DXGI_FORMAT_R32_UINT);
 		deviceContext.DrawIndexed(submesh.indexCount, submesh.startIndex, 0);
@@ -395,10 +489,16 @@ ForwardRenderer::createShadowResources(Device& device) {
 void
 ForwardRenderer::updateLightMatrices(const Camera& camera, const RenderScene& scene) {
 	EU::Vector3 lightDir = EU::Vector3(0.0f, -1.0f, 0.0f);
-	if (!scene.directionalLights.empty()) {
-		lightDir = scene.directionalLights.front().direction;
+	const LightData* shadowLight = findPrimaryShadowLight(scene);
+	m_hasShadowCastingLight = shadowLight != nullptr;
+	if (shadowLight) {
+		lightDir = shadowLight->direction;
 	}
 
+	const float lightDirLengthSq = lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z;
+	if (!std::isfinite(lightDirLengthSq) || lightDirLengthSq <= 1e-8f) {
+		lightDir = EU::Vector3(0.0f, -1.0f, 0.0f);
+	}
 	XMVECTOR lightDirVec = XMVector3Normalize(XMVectorSet(lightDir.x, lightDir.y, lightDir.z, 0.0f));
 	XMVECTOR cameraPos = XMVectorSet(camera.getPosition().x, camera.getPosition().y, camera.getPosition().z, 1.0f);
 	XMVECTOR lightTarget = cameraPos;
@@ -415,6 +515,10 @@ ForwardRenderer::updateLightMatrices(const Camera& camera, const RenderScene& sc
 
 HRESULT
 ForwardRenderer::createBlendStates(Device& device) {
+	SAFE_RELEASE(m_alphaBlendState);
+	SAFE_RELEASE(m_opaqueBlendState);
+	SAFE_RELEASE(m_additiveBlendState);
+	SAFE_RELEASE(m_premultipliedBlendState);
 	if (!device.m_device) {
 		return E_POINTER;
 	}

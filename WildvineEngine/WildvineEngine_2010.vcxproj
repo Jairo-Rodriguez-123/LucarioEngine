@@ -445,7 +445,7 @@
     <ClCompile Include="source\ECS\Actor.cpp" />
     <ClCompile Include="source\EditorViewportPass.cpp" />
     <ClCompile Include="source\GUI\GUI.cpp" />
-    <ClCompile Include="source\Rendering\DefferredRenderer.cpp" />
+    <ClCompile Include="source\Rendering\DeferredRenderer.cpp" />
     <ClCompile Include="source\Rendering\ForwardRenderer.cpp" />
     <ClCompile Include="source\Rendering\MaterialInstance.cpp" />
     <ClCompile Include="source\Rendering\RenderPipeline.cpp" />

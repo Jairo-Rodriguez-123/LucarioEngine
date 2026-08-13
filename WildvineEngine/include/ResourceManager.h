@@ -29,29 +29,32 @@ public:
                                Args&&... args) {
 		static_assert(std::is_base_of<IResource, T>::value,
                       "T debe heredar de IResource");
-		// 1. ¿Ya existe el recurso en el caché?
+		// 1. Ya existe el recurso en el cach?
 		auto it = m_resources.find(key);
 		if (it != m_resources.end()) {
-			// Intentar castear al tipo correcto
+			// Intentar castear al tipo correcto. Si la clave existe con otro tipo
+			// o con un recurso fallido, liberarlo antes de reemplazarlo para no
+			// dejar recursos GPU/CPU vivos fuera del cache.
 			auto existing = std::dynamic_pointer_cast<T>(it->second);
 			if (existing && existing->GetState() == ResourceState::Loaded) {
 				return existing; // Flyweight: reutilizamos la instancia
 			}
+			if (it->second) {
+				it->second->unload();
+			}
+			m_resources.erase(it);
 		}
 
-		// 2. No existe o no está cargado -> crearlo y cargarlo
+		// 2. No existe o no est cargado -> crearlo y cargarlo
 		std::shared_ptr<T> resource = std::make_shared<T>(key, std::forward<Args>(args)...);
 
 		if (!resource->load(filename)) {
-			// Puedes manejar errores más fino aquí
+			// Puedes manejar errores ms fino aqu
 			return nullptr;
 		}
 
-		if (!resource->init()) {
-			return nullptr;
-		}
 
-		// 3. Guardar en el caché y devolver
+		// 3. Guardar en el cach y devolver
 		m_resources[key] = resource;
 		return resource;
 	}
@@ -66,7 +69,7 @@ public:
 		return std::dynamic_pointer_cast<T>(it->second);
 	}
 
-	/// Liberar un recurso específico
+	/// Liberar un recurso especfico
 	void Unload(const std::string& key)
 	{
 		auto it = m_resources.find(key);

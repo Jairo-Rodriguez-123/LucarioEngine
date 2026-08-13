@@ -98,7 +98,7 @@ public:
   /**
    * @brief Estructura de Direct3D que define el viewport.
    */
-  D3D11_VIEWPORT m_viewport;
+  D3D11_VIEWPORT m_viewport{};
 };
 
 

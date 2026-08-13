@@ -3,13 +3,19 @@
  * @brief Implementa la logica de EditorViewportPass dentro del subsistema Utilities.
  * @ingroup utilities
  */
-#include "EngineUtilities\Utilities\EditorViewportPass.h"
+#include "EngineUtilities/Utilities/EditorViewportPass.h"
 #include "Device.h"
 #include "DeviceContext.h"
 
 HRESULT EditorViewportPass::init(Device& device, unsigned int width, unsigned int height)
 {
-	return createResources(device, width, height);
+	EditorViewportPass replacement;
+	HRESULT hr = replacement.createResources(device, width, height);
+	if (FAILED(hr)) {
+		return hr;
+	}
+	swap(replacement);
+	return S_OK;
 }
 
 HRESULT EditorViewportPass::resize(Device& device, unsigned int width, unsigned int height)
@@ -20,7 +26,13 @@ HRESULT EditorViewportPass::resize(Device& device, unsigned int width, unsigned 
 	if (width == m_width && height == m_height && isValid())
 		return S_OK;
 
-	return createResources(device, width, height);
+	EditorViewportPass replacement;
+	HRESULT hr = replacement.createResources(device, width, height);
+	if (FAILED(hr)) {
+		return hr;
+	}
+	swap(replacement);
+	return S_OK;
 }
 
 HRESULT EditorViewportPass::createResources(Device& device, unsigned int width, unsigned int height)
@@ -115,7 +127,7 @@ void EditorViewportPass::setViewport(DeviceContext& deviceContext)
 	vp.MinDepth = 0.0f;
 	vp.MaxDepth = 1.0f;
 
-	deviceContext.m_deviceContext->RSSetViewports(1, &vp);
+	deviceContext.RSSetViewports(1, &vp);
 }
 
 void EditorViewportPass::destroy()

@@ -16,7 +16,7 @@ class
 EditorViewportPass {
 public:
 	EditorViewportPass() = default;
-	~EditorViewportPass() = default;
+	~EditorViewportPass() { destroy(); }
 
 	HRESULT init(Device& device, unsigned int width, unsigned int height);
 	HRESULT resize(Device& device, unsigned int width, unsigned int height);
@@ -28,6 +28,8 @@ public:
 	void destroy();
 
 	ID3D11ShaderResourceView* getSRV() const { return m_colorSRV.m_textureFromImg; }
+	ID3D11RenderTargetView* getRTV() const { return m_rtv.get(); }
+	ID3D11DepthStencilView* getDSV() const { return m_dsv.get(); }
 
 	unsigned int getWidth() const { return m_width; }
 	unsigned int getHeight() const { return m_height; }
@@ -36,7 +38,9 @@ public:
 	{
 		return m_colorTexture.m_texture != nullptr &&
 			m_colorSRV.m_textureFromImg != nullptr &&
-			m_depthTexture.m_texture != nullptr;
+			m_rtv.get() != nullptr &&
+			m_depthTexture.m_texture != nullptr &&
+			m_dsv.get() != nullptr;
 	}
 
 private:

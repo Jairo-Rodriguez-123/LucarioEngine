@@ -58,7 +58,7 @@ public:
     *  @param width New width in pixels.
     *  @param height New height in pixels.
   */
-  virtual void resize(Device& device, unsigned int width, unsigned int height) = 0;
+  virtual HRESULT resize(Device& device, unsigned int width, unsigned int height) = 0;
   /*
     *  @brief Render the scene from the provided camera into the current render targets.
     *
@@ -69,8 +69,8 @@ public:
   */
   virtual void render(DeviceContext& deviceContext,
     const Camera& camera,
-    const RenderScene& scene,
-    EditorViewportPass viewportPass) = 0;
+    RenderScene& scene,
+    EditorViewportPass& viewportPass) = 0;
   /*
     *  @brief Release all GPU and CPU resources owned by the renderer.
   */
@@ -100,7 +100,7 @@ public:
     *  @brief Get shader resource view for G-Buffer world-space AO (ambient occlusion).
     *  @return Pointer to ID3D11ShaderResourceView or nullptr when unsupported.
   */
-  virtual ID3D11ShaderResourceView* getGBufferWorldAoSVR() const { return nullptr; }
+  virtual ID3D11ShaderResourceView* getGBufferWorldAoSRV() const { return nullptr; }
   /*
     *  @brief Get shader resource view for G-Buffer emissive + alpha channel.
     *  @return Pointer to ID3D11ShaderResourceView or nullptr when unsupported.

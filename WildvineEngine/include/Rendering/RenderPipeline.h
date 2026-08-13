@@ -15,9 +15,11 @@
 class
 	RenderPipeline {
 public:
+	~RenderPipeline() { destroy(); }
+
 	HRESULT init(Device& device, RendererType initialRenderer = RendererType::Deferred);
 	HRESULT setRendererType(RendererType rendererType, Device& device);
-	void resize(Device& device, unsigned int width, unsigned int height);
+	HRESULT resize(Device& device, unsigned int width, unsigned int height);
 	void render(DeviceContext& deviceContext,
 		const Camera& camera,
 		RenderScene& scene,
@@ -47,4 +49,6 @@ private:
 	RendererType m_activeRendererType = RendererType::Deferred;
 	bool m_forwardInitialized = false;
 	bool m_deferredInitialized = false;
+	unsigned int m_lastWidth = 1280;
+	unsigned int m_lastHeight = 720;
 };

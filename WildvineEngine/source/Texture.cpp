@@ -10,6 +10,10 @@
 #include "DeviceContext.h"
 #include <cstdint>
 #include <fstream>
+#include <algorithm>
+#include <cmath>
+#include <utility>
+#include <limits>
 
 namespace {
 constexpr uint32_t kTextureCacheMagic = 0x58545657; // WVTX
@@ -50,19 +54,52 @@ bool IsTextureCacheUpToDate(const std::string& sourcePath, const std::string& ca
   return cacheWriteTime >= sourceWriteTime;
 }
 
+bool ComputeTextureDataSize(int width, int height, uint32_t& outSize) {
+  if (width <= 0 || height <= 0 ||
+      width > static_cast<int>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) ||
+      height > static_cast<int>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)) {
+    return false;
+  }
+
+  const uint64_t dataSize = static_cast<uint64_t>(width) *
+                            static_cast<uint64_t>(height) * 4ull;
+  if (dataSize == 0 || dataSize > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+
+  outSize = static_cast<uint32_t>(dataSize);
+  return true;
+}
+
+bool ComputeRgbaRowPitch(int width, UINT& outPitch) {
+  if (width <= 0) {
+    return false;
+  }
+  const uint64_t pitch = static_cast<uint64_t>(width) * 4ull;
+  if (pitch > std::numeric_limits<UINT>::max()) {
+    return false;
+  }
+  outPitch = static_cast<UINT>(pitch);
+  return true;
+}
+
 bool SaveTextureCache(const std::string& cachePath, int width, int height, const unsigned char* data) {
+  uint32_t dataSize = 0;
+  if (!data || !ComputeTextureDataSize(width, height, dataSize)) {
+    return false;
+  }
+
   std::ofstream stream(cachePath, std::ios::binary | std::ios::trunc);
   if (!stream.is_open()) {
     return false;
   }
 
-  const uint32_t dataSize = static_cast<uint32_t>(width * height * 4);
   stream.write(reinterpret_cast<const char*>(&kTextureCacheMagic), sizeof(kTextureCacheMagic));
   stream.write(reinterpret_cast<const char*>(&kTextureCacheVersion), sizeof(kTextureCacheVersion));
   stream.write(reinterpret_cast<const char*>(&width), sizeof(width));
   stream.write(reinterpret_cast<const char*>(&height), sizeof(height));
   stream.write(reinterpret_cast<const char*>(&dataSize), sizeof(dataSize));
-  stream.write(reinterpret_cast<const char*>(data), dataSize);
+  stream.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(dataSize));
   return stream.good();
 }
 
@@ -81,17 +118,26 @@ bool LoadTextureCache(const std::string& cachePath, CachedTextureData& outTextur
   stream.read(reinterpret_cast<char*>(&outTexture.height), sizeof(outTexture.height));
   stream.read(reinterpret_cast<char*>(&dataSize), sizeof(dataSize));
 
+  uint32_t expectedDataSize = 0;
   if (!stream.good() ||
       magic != kTextureCacheMagic ||
       version != kTextureCacheVersion ||
-      outTexture.width <= 0 ||
-      outTexture.height <= 0 ||
-      dataSize != static_cast<uint32_t>(outTexture.width * outTexture.height * 4)) {
+      !ComputeTextureDataSize(outTexture.width, outTexture.height, expectedDataSize) ||
+      dataSize != expectedDataSize) {
     return false;
   }
 
+  const std::streampos payloadStart = stream.tellg();
+  stream.seekg(0, std::ios::end);
+  const std::streampos fileEnd = stream.tellg();
+  if (payloadStart < 0 || fileEnd < payloadStart ||
+      static_cast<uint64_t>(fileEnd - payloadStart) < static_cast<uint64_t>(dataSize)) {
+    return false;
+  }
+  stream.seekg(payloadStart);
+
   outTexture.rgba.resize(dataSize);
-  stream.read(reinterpret_cast<char*>(outTexture.rgba.data()), dataSize);
+  stream.read(reinterpret_cast<char*>(outTexture.rgba.data()), static_cast<std::streamsize>(dataSize));
   return stream.good();
 }
 
@@ -101,9 +147,22 @@ HRESULT CreateTextureFromRGBA(Device& device,
                               const unsigned char* data,
                               ID3D11Texture2D** outTexture,
                               ID3D11ShaderResourceView** outSRV) {
+  if (!device.m_device || width <= 0 || height <= 0 || !data || !outTexture || !outSRV) {
+    return E_INVALIDARG;
+  }
+
+  if (width > static_cast<int>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) ||
+      height > static_cast<int>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)) {
+    return E_INVALIDARG;
+  }
+  UINT rowPitch = 0;
+  if (!ComputeRgbaRowPitch(width, rowPitch)) {
+    return E_INVALIDARG;
+  }
+
   D3D11_TEXTURE2D_DESC textureDesc = {};
-  textureDesc.Width = width;
-  textureDesc.Height = height;
+  textureDesc.Width = static_cast<UINT>(width);
+  textureDesc.Height = static_cast<UINT>(height);
   textureDesc.MipLevels = 1;
   textureDesc.ArraySize = 1;
   textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -113,13 +172,14 @@ HRESULT CreateTextureFromRGBA(Device& device,
 
   D3D11_SUBRESOURCE_DATA initData = {};
   initData.pSysMem = data;
-  initData.SysMemPitch = width * 4;
+  initData.SysMemPitch = rowPitch;
 
   HRESULT hr = device.CreateTexture2D(&textureDesc, &initData, outTexture);
   if (FAILED(hr)) {
     return hr;
   }
 
+  SAFE_RELEASE(*outSRV);
   D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
   srvDesc.Format = textureDesc.Format;
   srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -151,6 +211,16 @@ HRESULT InitTextureFromImage(Device& device, const std::string& fullPath, Textur
     uploadData = cachedTexture.rgba.data();
   }
   else {
+    int infoWidth = 0;
+    int infoHeight = 0;
+    int infoChannels = 0;
+    uint32_t expectedDecodedSize = 0;
+    if (!stbi_info(fullPath.c_str(), &infoWidth, &infoHeight, &infoChannels) ||
+        !ComputeTextureDataSize(infoWidth, infoHeight, expectedDecodedSize)) {
+      ERROR("Texture", "init", "Texture dimensions are invalid or exceed D3D11 limits.");
+      return E_INVALIDARG;
+    }
+
     decodedData = stbi_load(fullPath.c_str(), &width, &height, &channels, 4);
     if (!decodedData) {
       ERROR("Texture", "init",
@@ -173,10 +243,48 @@ HRESULT InitTextureFromImage(Device& device, const std::string& fullPath, Textur
     return hr;
   }
 
-  SAFE_RELEASE(texture.m_texture);
   return S_OK;
 }
 }
+
+
+Texture::Texture(const Texture& other)
+  : m_texture(other.m_texture), m_textureFromImg(other.m_textureFromImg), m_textureName(other.m_textureName) {
+  if (m_texture) m_texture->AddRef();
+  if (m_textureFromImg) m_textureFromImg->AddRef();
+}
+
+Texture& Texture::operator=(const Texture& other) {
+  if (this == &other) return *this;
+  ID3D11Texture2D* newTexture = other.m_texture;
+  ID3D11ShaderResourceView* newSRV = other.m_textureFromImg;
+  if (newTexture) newTexture->AddRef();
+  if (newSRV) newSRV->AddRef();
+  destroy();
+  m_texture = newTexture;
+  m_textureFromImg = newSRV;
+  m_textureName = other.m_textureName;
+  return *this;
+}
+
+Texture::Texture(Texture&& other) noexcept
+  : m_texture(other.m_texture), m_textureFromImg(other.m_textureFromImg), m_textureName(std::move(other.m_textureName)) {
+  other.m_texture = nullptr;
+  other.m_textureFromImg = nullptr;
+}
+
+Texture& Texture::operator=(Texture&& other) noexcept {
+  if (this == &other) return *this;
+  destroy();
+  m_texture = other.m_texture;
+  m_textureFromImg = other.m_textureFromImg;
+  m_textureName = std::move(other.m_textureName);
+  other.m_texture = nullptr;
+  other.m_textureFromImg = nullptr;
+  return *this;
+}
+
+Texture::~Texture() { destroy(); }
 
 HRESULT 
 Texture::init(Device& device, 
@@ -191,13 +299,22 @@ Texture::init(Device& device,
 		return E_INVALIDARG;
 	}
 
+	destroy();
 	HRESULT hr = S_OK;
+
+	auto resolvePath = [&](const char* defaultExtension) {
+		const size_t slash = textureName.find_last_of("/\\");
+		const size_t dot = textureName.find_last_of('.');
+		const bool hasExtension = dot != std::string::npos &&
+			(slash == std::string::npos || dot > slash);
+		return hasExtension ? textureName : textureName + defaultExtension;
+	};
 
 	switch (extensionType) {
 	case DDS: {
-		m_textureName = textureName + ".dds";
-
-		hr = D3DX11CreateShaderResourceViewFromFile(
+		m_textureName = resolvePath(".dds");
+#if WV_HAS_D3DX11
+		hr = D3DX11CreateShaderResourceViewFromFileA(
 			device.m_device,
 			m_textureName.c_str(),
 			nullptr,
@@ -211,16 +328,21 @@ Texture::init(Device& device,
 				("Failed to load DDS texture. Verify filepath: " + m_textureName).c_str());
 			return hr;
 		}
+#else
+		ERROR("Texture", "init",
+			"DDS loading requires legacy D3DX11 or a dedicated DDS loader. PNG/JPG/TGA-style images do not require D3DX11.");
+		return E_NOTIMPL;
+#endif
 		break;
 	}
 
 	case PNG: {
-    m_textureName = textureName + ".png";
+    m_textureName = resolvePath(".png");
     hr = InitTextureFromImage(device, m_textureName, *this);
 		break;
 	}
 	case JPG: {
-    m_textureName = textureName + ".jpg";
+    m_textureName = resolvePath(".jpg");
     hr = InitTextureFromImage(device, m_textureName, *this);
 		break;
 	}
@@ -244,20 +366,24 @@ Texture::init(Device& device,
     ERROR("Texture", "init", "Device is null.");
     return E_POINTER;
   }
-  if (width == 0 || height == 0) {
-    ERROR("Texture", "init", "Width and height must be greater than 0");
+  if (width == 0 || height == 0 ||
+      width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+      height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+    ERROR("Texture", "init", "Texture dimensions are invalid or exceed D3D11 limits");
     return E_INVALIDARG;
   }
 
-  D3D11_TEXTURE2D_DESC desc;
-  memset(&desc, 0, sizeof(desc));
+  if (Format == DXGI_FORMAT_UNKNOWN || BindFlags == 0 || sampleCount == 0) return E_INVALIDARG;
+  destroy();
+
+  D3D11_TEXTURE2D_DESC desc{};
   desc.Width = width;
   desc.Height = height;
   desc.MipLevels = 1;
   desc.ArraySize = 1;
   desc.Format = Format;
   desc.SampleDesc.Count = sampleCount;
-  desc.SampleDesc.Quality = qualityLevels;
+  desc.SampleDesc.Quality = sampleCount > 1 ? qualityLevels : 0;
   desc.Usage = D3D11_USAGE_DEFAULT;
   desc.BindFlags = BindFlags;
   desc.CPUAccessFlags = 0;
@@ -274,6 +400,29 @@ Texture::init(Device& device,
   return S_OK;
 }
 
+HRESULT
+Texture::initSolidColor(Device& device,
+                        unsigned char r,
+                        unsigned char g,
+                        unsigned char b,
+                        unsigned char a) {
+  if (!device.m_device) {
+    return E_POINTER;
+  }
+
+  destroy();
+  const unsigned char pixel[4] = { r, g, b, a };
+  const HRESULT hr = CreateTextureFromRGBA(
+    device, 1, 1, pixel, &m_texture, &m_textureFromImg);
+  if (FAILED(hr)) {
+    destroy();
+    ERROR("Texture", "initSolidColor", "Failed to create 1x1 fallback texture");
+    return hr;
+  }
+  m_textureName = "<generated-solid-color>";
+  return S_OK;
+}
+
 HRESULT 
 Texture::init(Device& device, Texture& textureRef, DXGI_FORMAT format) {
   if (!device.m_device) {
@@ -284,12 +433,24 @@ Texture::init(Device& device, Texture& textureRef, DXGI_FORMAT format) {
     ERROR("Texture", "init", "Texture is null.");
     return E_POINTER;
   }
+  if (format == DXGI_FORMAT_UNKNOWN) {
+    return E_INVALIDARG;
+  }
 
-  D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+  destroy();
+  D3D11_TEXTURE2D_DESC textureDesc{};
+  textureRef.m_texture->GetDesc(&textureDesc);
+
+  D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
   srvDesc.Format = format;
-  srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-  srvDesc.Texture2D.MipLevels = 1;
-  srvDesc.Texture2D.MostDetailedMip = 0;
+  if (textureDesc.SampleDesc.Count > 1) {
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+  }
+  else {
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+  }
 
   HRESULT hr = device.m_device->CreateShaderResourceView(textureRef.m_texture,
                                                          &srvDesc,
@@ -297,7 +458,8 @@ Texture::init(Device& device, Texture& textureRef, DXGI_FORMAT format) {
 
   if (FAILED(hr)) {
     ERROR("Texture", "init",
-      ("Failed to create shader resource view for PNG textures. HRESULT: " + std::to_string(hr)).c_str());
+      ("Failed to create texture shader resource view. HRESULT: " + std::to_string(hr)).c_str());
+    destroy();
     return hr;
   }
 
@@ -318,19 +480,17 @@ Texture::render(DeviceContext& deviceContext,
     return;
   }
 
-  if (m_textureFromImg) {
-    deviceContext.PSSetShaderResources(StartSlot, NumViews, &m_textureFromImg);
+  if (m_textureFromImg && NumViews > 0) {
+    // La clase encapsula una sola SRV; evita que D3D lea punteros adyacentes.
+    deviceContext.PSSetShaderResources(StartSlot, 1, &m_textureFromImg);
   }
 }
 
 void 
 Texture::destroy() {
-  if (m_texture != nullptr) {
-    SAFE_RELEASE(m_texture);
-  }
-  if (m_textureFromImg != nullptr) {
-    SAFE_RELEASE(m_textureFromImg);
-  }
+  SAFE_RELEASE(m_texture);
+  SAFE_RELEASE(m_textureFromImg);
+  m_textureName.clear();
 }
 
 HRESULT 
@@ -338,24 +498,70 @@ Texture::CreateCubemap(Device& device,
                        DeviceContext& deviceContext, 
                        const std::array<std::string, 6>& facePaths, 
                        bool generateMips) {
+  if (!device.m_device || !deviceContext.m_deviceContext) return E_POINTER;
   destroy();
 
   stbi_set_flip_vertically_on_load(false);
 
   int width = 0, height = 0, channels = 0;
   std::array<unsigned char*, 6> facePixels{};
+  std::array<std::string, 6> resolvedPaths{};
   facePixels.fill(nullptr);
 
-  for (int i = 0; i < 6; ++i) {
-		int w = 0, h = 0, c = 0;
-    facePixels[i] = stbi_load(facePaths[i].c_str(), &w, &h, &c, 4);
-    if (!facePixels[i]) {
-      for (int k = 0; k < i; ++k) {
-        if (facePixels[k]) {
-          stbi_image_free(facePixels[k]);
-        }
+  // Visual Studio puede ejecutar con distintos directorios de trabajo.
+  // Prueba primero la ruta original y luego ubicaciones comunes del proyecto.
+  auto resolveFacePath = [](const std::string& requested,
+                            std::string& resolved,
+                            int& outW, int& outH, int& outC) -> bool {
+    const std::array<std::string, 8> candidates = {
+      requested,
+      std::string("Resource Files/") + requested,
+      std::string("../") + requested,
+      std::string("../Resource Files/") + requested,
+      std::string("../../") + requested,
+      std::string("../../Resource Files/") + requested,
+      std::string("../../../") + requested,
+      std::string("../../../Resource Files/") + requested
+    };
+
+    for (const std::string& candidate : candidates) {
+      int w = 0, h = 0, c = 0;
+      if (stbi_info(candidate.c_str(), &w, &h, &c)) {
+        resolved = candidate;
+        outW = w;
+        outH = h;
+        outC = c;
+        return true;
       }
-      return E_FAIL;
+    }
+    return false;
+  };
+
+  // Validate every face before decoding so malformed/oversized files cannot
+  // trigger large allocations and we fail before creating partial GPU state.
+  for (int i = 0; i < 6; ++i) {
+    int w = 0, h = 0, c = 0;
+    uint32_t faceDataSize = 0;
+
+    if (!resolveFacePath(facePaths[i], resolvedPaths[i], w, h, c)) {
+      const std::string msg = std::string("Could not find/decode cubemap face: ") + facePaths[i] +
+        ". Tried the project directory and Resource Files variants.";
+      ERROR("Texture", "CreateCubemap", msg.c_str());
+      return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
+
+    if (!ComputeTextureDataSize(w, h, faceDataSize)) {
+      const std::string msg = std::string("Cubemap face has invalid/unsupported dimensions: ") +
+        resolvedPaths[i] + " (" + std::to_string(w) + "x" + std::to_string(h) + ").";
+      ERROR("Texture", "CreateCubemap", msg.c_str());
+      return E_INVALIDARG;
+    }
+
+    if (w != h) {
+      const std::string msg = std::string("Cubemap face must be square: ") + resolvedPaths[i] +
+        " is " + std::to_string(w) + "x" + std::to_string(h) + ".";
+      ERROR("Texture", "CreateCubemap", msg.c_str());
+      return E_INVALIDARG;
     }
 
     if (i == 0) {
@@ -363,14 +569,44 @@ Texture::CreateCubemap(Device& device,
       height = h;
     }
     else if (w != width || h != height) {
-      ERROR("Texture", "CreateCubemap", "All cubemap faces must have the same dimensions.");
+      const std::string msg = std::string("All cubemap faces must have the same dimensions. ") +
+        resolvedPaths[i] + " is " + std::to_string(w) + "x" + std::to_string(h) +
+        ", expected " + std::to_string(width) + "x" + std::to_string(height) + ".";
+      ERROR("Texture", "CreateCubemap", msg.c_str());
+      return E_INVALIDARG;
+    }
+  }
+
+  for (int i = 0; i < 6; ++i) {
+    int w = 0, h = 0, c = 0;
+    facePixels[i] = stbi_load(resolvedPaths[i].c_str(), &w, &h, &c, 4);
+    if (!facePixels[i] || w != width || h != height) {
       for (int k = 0; k <= i; ++k) {
         if (facePixels[k]) {
           stbi_image_free(facePixels[k]);
         }
       }
+      const std::string msg = std::string("Failed to decode cubemap face consistently: ") + resolvedPaths[i];
+      ERROR("Texture", "CreateCubemap", msg.c_str());
       return E_FAIL;
-		}
+    }
+  }
+
+  if (width <= 0 || height <= 0 || width != height ||
+      width > static_cast<int>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)) {
+    ERROR("Texture", "CreateCubemap", "Cubemap faces must be square and within D3D11 texture size limits.");
+    for (auto* p : facePixels) {
+      if (p) stbi_image_free(p);
+    }
+    return E_INVALIDARG;
+  }
+
+  UINT rowPitch = 0;
+  if (!ComputeRgbaRowPitch(width, rowPitch)) {
+    for (auto* p : facePixels) {
+      if (p) stbi_image_free(p);
+    }
+    return E_INVALIDARG;
   }
 
   D3D11_TEXTURE2D_DESC texDesc{};
@@ -393,7 +629,7 @@ Texture::CreateCubemap(Device& device,
     for (int face = 0; face < 6; ++face)
     {
       initData[face].pSysMem = facePixels[face];
-      initData[face].SysMemPitch = static_cast<unsigned int>(width * 4);
+      initData[face].SysMemPitch = rowPitch;
       initData[face].SysMemSlicePitch = 0;
     }
 
@@ -418,7 +654,7 @@ Texture::CreateCubemap(Device& device,
       return hr;
     }
 
-    UINT mipCount = 1 + (UINT)floor(log2(max(width, height)));
+    UINT mipCount = 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(width, height)))));
 
     for (UINT face = 0; face < 6; ++face)
     {
@@ -429,7 +665,7 @@ Texture::CreateCubemap(Device& device,
         sub,
         nullptr,
         facePixels[face],
-        width * 4,
+        rowPitch,
         0
       );
     }

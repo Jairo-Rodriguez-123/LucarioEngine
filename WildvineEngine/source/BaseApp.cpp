@@ -9,11 +9,187 @@
 #include <cctype>
 #include <fstream>
 #include <iomanip>
+#include <filesystem>
+#include <cmath>
+#include <limits>
+#include <commdlg.h>
+#include <shellapi.h>
+#include <functional>
+#include <cstdio>
+
+#if defined(_MSC_VER)
+#pragma comment(lib, "Comdlg32.lib")
+#pragma comment(lib, "Shell32.lib")
+#endif
 
 namespace {
+	constexpr int kCurrentSceneVersion = 5;
+	constexpr size_t kMaxSerializedActors = 10000;
+	constexpr size_t kMaxSerializedMaterialsPerActor = 1024;
+
 	bool isSerializedLightActorName(const std::string& actorName)
 	{
 		return actorName.rfind("Light Actor", 0) == 0;
+	}
+
+	bool isFinite(float value)
+	{
+		return std::isfinite(value);
+	}
+
+	bool isFinite(const EU::Vector3& value)
+	{
+		return isFinite(value.x) && isFinite(value.y) && isFinite(value.z);
+	}
+
+	bool isFinite(const XMFLOAT4& value)
+	{
+		return isFinite(value.x) && isFinite(value.y) &&
+			isFinite(value.z) && isFinite(value.w);
+	}
+
+	bool areFinite(const MaterialParams& params)
+	{
+		return isFinite(params.baseColor) &&
+			isFinite(params.metallic) &&
+			isFinite(params.roughness) &&
+			isFinite(params.ao) &&
+			isFinite(params.normalScale) &&
+			isFinite(params.emissiveStrength) &&
+			isFinite(params.alphaCutoff);
+	}
+
+	std::string lowerAscii(std::string value)
+	{
+		std::transform(value.begin(), value.end(), value.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return value;
+	}
+
+	std::filesystem::path getExecutableDirectory()
+	{
+		char modulePath[32768] = {};
+		const DWORD length = GetModuleFileNameA(nullptr, modulePath, static_cast<DWORD>(sizeof(modulePath)));
+		if (length == 0 || length >= sizeof(modulePath)) {
+			return std::filesystem::path();
+		}
+		return std::filesystem::path(modulePath).parent_path();
+	}
+
+	void appendSearchRoot(std::vector<std::filesystem::path>& roots, const std::filesystem::path& root)
+	{
+		if (root.empty()) return;
+		const std::filesystem::path normalized = root.lexically_normal();
+		for (const auto& existing : roots) {
+			if (lowerAscii(existing.generic_string()) == lowerAscii(normalized.generic_string())) {
+				return;
+			}
+		}
+		roots.push_back(normalized);
+	}
+
+	std::vector<std::filesystem::path> getAssetSearchRoots()
+	{
+		namespace fs = std::filesystem;
+		std::vector<fs::path> roots;
+		std::error_code ec;
+		const fs::path cwd = fs::current_path(ec);
+		if (!ec) {
+			fs::path current = cwd;
+			for (int i = 0; i < 5 && !current.empty(); ++i) {
+				appendSearchRoot(roots, current);
+				const fs::path parent = current.parent_path();
+				if (parent == current) break;
+				current = parent;
+			}
+		}
+
+		fs::path executableDir = getExecutableDirectory();
+		for (int i = 0; i < 6 && !executableDir.empty(); ++i) {
+			appendSearchRoot(roots, executableDir);
+			const fs::path parent = executableDir.parent_path();
+			if (parent == executableDir) break;
+			executableDir = parent;
+		}
+		return roots;
+	}
+
+	bool isUsableOBJFile(const std::filesystem::path& path)
+	{
+		std::error_code ec;
+		if (!std::filesystem::exists(path, ec) || ec || !std::filesystem::is_regular_file(path, ec) || ec) {
+			return false;
+		}
+		return lowerAscii(path.extension().string()) == ".obj";
+	}
+
+	bool resolveOBJAssetPath(const std::string& serializedPath, const std::string& actorName, std::filesystem::path& resolvedPath)
+	{
+		namespace fs = std::filesystem;
+		resolvedPath.clear();
+		const fs::path requested(serializedPath);
+
+		if (!requested.empty() && requested.is_absolute() && isUsableOBJFile(requested)) {
+			resolvedPath = requested.lexically_normal();
+			return true;
+		}
+
+		std::vector<fs::path> candidates;
+		const auto roots = getAssetSearchRoots();
+		if (!requested.empty()) {
+			if (isUsableOBJFile(requested)) {
+				resolvedPath = requested.lexically_normal();
+				return true;
+			}
+			for (const fs::path& root : roots) {
+				candidates.push_back(root / requested);
+			}
+		}
+
+		fs::path filename = requested.filename();
+		if (filename.empty() && !actorName.empty()) {
+			filename = fs::path(actorName + ".obj");
+		}
+		if (!filename.empty()) {
+			for (const fs::path& root : roots) {
+				candidates.push_back(root / "Assets" / "Models" / filename);
+			}
+		}
+
+		if (!actorName.empty()) {
+			const fs::path actorFilename(actorName + ".obj");
+			for (const fs::path& root : roots) {
+				candidates.push_back(root / "Assets" / "Models" / actorFilename);
+			}
+		}
+
+		for (const fs::path& candidate : candidates) {
+			if (isUsableOBJFile(candidate)) {
+				resolvedPath = candidate.lexically_normal();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	std::string makePortableAssetPath(const std::filesystem::path& sourcePath)
+	{
+		namespace fs = std::filesystem;
+		std::error_code ec;
+		fs::path absolutePath = fs::absolute(sourcePath, ec);
+		if (ec) absolutePath = sourcePath;
+		absolutePath = absolutePath.lexically_normal();
+
+		for (auto it = absolutePath.begin(); it != absolutePath.end(); ++it) {
+			if (lowerAscii(it->string()) == "assets") {
+				fs::path portable;
+				for (auto jt = it; jt != absolutePath.end(); ++jt) {
+					portable /= *jt;
+				}
+				return portable.generic_string();
+			}
+		}
+		return absolutePath.string();
 	}
 
 	void ensureDefaultLightComponent(const EU::TSharedPointer<Actor>& actor)
@@ -36,6 +212,727 @@ namespace {
 		light.range = 12.0f;
 		light.spotAngle = 0.0f;
 		lightComponent->setCastShadow(true);
+	}
+
+	bool resolveOptionalAssetPath(const std::string& relativePath, std::string& resolvedPath)
+	{
+		namespace fs = std::filesystem;
+		const fs::path requested(relativePath);
+		const std::array<fs::path, 7> candidates = {
+			requested,
+			fs::path("Resource Files") / requested,
+			fs::path("..") / requested,
+			fs::path("..") / "Resource Files" / requested,
+			fs::path("..") / ".." / requested,
+			fs::path("..") / ".." / "Resource Files" / requested,
+			fs::path("..") / ".." / ".." / requested
+		};
+
+		std::error_code ec;
+		for (const fs::path& candidate : candidates) {
+			ec.clear();
+			if (fs::exists(candidate, ec) && fs::is_regular_file(candidate, ec)) {
+				resolvedPath = candidate.lexically_normal().string();
+				return true;
+			}
+		}
+		resolvedPath.clear();
+		return false;
+	}
+
+	struct ObjMaterialInfo {
+		std::string name;
+		XMFLOAT4 baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+		EU::Vector3 emissiveColor = EU::Vector3(0.0f, 0.0f, 0.0f);
+		float metallic = 0.0f;
+		float roughness = 0.55f;
+		float ao = 1.0f;
+		float normalScale = 1.0f;
+		bool hasMetallicValue = false;
+		bool hasRoughnessValue = false;
+		std::string albedoMap;
+		std::string normalMap;
+		std::string metallicMap;
+		std::string roughnessMap;
+		std::string aoMap;
+		std::string emissiveMap;
+		std::filesystem::path sourceDirectory;
+	};
+
+	std::string trimAscii(const std::string& value)
+	{
+		const size_t first = value.find_first_not_of(" \t\r\n");
+		if (first == std::string::npos) return std::string();
+		const size_t last = value.find_last_not_of(" \t\r\n");
+		return value.substr(first, last - first + 1);
+	}
+
+	std::string stripOptionalQuotes(std::string value)
+	{
+		value = trimAscii(value);
+		if (value.size() >= 2 &&
+			((value.front() == '"' && value.back() == '"') ||
+			 (value.front() == '\'' && value.back() == '\''))) {
+			value = value.substr(1, value.size() - 2);
+		}
+		return value;
+	}
+
+	std::string parseMtlMapFilename(const std::string& remainder)
+	{
+		std::string value = trimAscii(remainder);
+		if (value.empty()) return std::string();
+
+		// Quoted filenames are unambiguous and may contain spaces.
+		const size_t firstQuote = value.find('"');
+		if (firstQuote != std::string::npos) {
+			const size_t secondQuote = value.find('"', firstQuote + 1);
+			if (secondQuote != std::string::npos && secondQuote > firstQuote + 1) {
+				return value.substr(firstQuote + 1, secondQuote - firstQuote - 1);
+			}
+		}
+
+		// MTL texture options (-s, -o, -bm, etc.) precede the filename.
+		// Taking the final token handles the common exporter output safely.
+		std::istringstream tokens(value);
+		std::string token;
+		std::string lastToken;
+		while (tokens >> token) {
+			lastToken = token;
+		}
+		return stripOptionalQuotes(lastToken);
+	}
+
+	float parseMtlBumpScale(const std::string& remainder, float fallback)
+	{
+		std::istringstream tokens(remainder);
+		std::string token;
+		while (tokens >> token) {
+			if (lowerAscii(token) == "-bm") {
+				float value = fallback;
+				if ((tokens >> value) && std::isfinite(value)) return value;
+				break;
+			}
+		}
+		return fallback;
+	}
+
+	bool isUsableRegularFile(const std::filesystem::path& path)
+	{
+		std::error_code ec;
+		return std::filesystem::exists(path, ec) && !ec &&
+			std::filesystem::is_regular_file(path, ec) && !ec;
+	}
+
+	bool isSupportedMaterialTextureFile(const std::filesystem::path& path)
+	{
+		if (!isUsableRegularFile(path)) return false;
+		const std::string extension = lowerAscii(path.extension().string());
+		return extension == ".png" || extension == ".jpg" || extension == ".jpeg" ||
+			extension == ".tga" || extension == ".bmp" || extension == ".dds";
+	}
+
+	const char* materialTextureChannelName(MaterialTextureChannel channel)
+	{
+		switch (channel) {
+		case MaterialTextureChannel::Albedo: return "Albedo";
+		case MaterialTextureChannel::Normal: return "Normal";
+		case MaterialTextureChannel::Metallic: return "Metallic";
+		case MaterialTextureChannel::Roughness: return "Roughness";
+		case MaterialTextureChannel::AO: return "AO";
+		case MaterialTextureChannel::Emissive: return "Emissive";
+		default: return "Texture";
+		}
+	}
+
+	bool isValidMaterialTextureChannel(int value)
+	{
+		return value >= static_cast<int>(MaterialTextureChannel::Albedo) &&
+			value <= static_cast<int>(MaterialTextureChannel::Emissive);
+	}
+
+	Texture* getMaterialTextureForChannel(MaterialInstance* materialInstance, MaterialTextureChannel channel)
+	{
+		if (!materialInstance) return nullptr;
+		switch (channel) {
+		case MaterialTextureChannel::Albedo: return materialInstance->getAlbedo();
+		case MaterialTextureChannel::Normal: return materialInstance->getNormal();
+		case MaterialTextureChannel::Metallic: return materialInstance->getMetallic();
+		case MaterialTextureChannel::Roughness: return materialInstance->getRoughness();
+		case MaterialTextureChannel::AO: return materialInstance->getAO();
+		case MaterialTextureChannel::Emissive: return materialInstance->getEmissive();
+		default: return nullptr;
+		}
+	}
+
+	void setMaterialTextureForChannel(MaterialInstance* materialInstance, MaterialTextureChannel channel, Texture* texture)
+	{
+		if (!materialInstance) return;
+		switch (channel) {
+		case MaterialTextureChannel::Albedo: materialInstance->setAlbedo(texture); break;
+		case MaterialTextureChannel::Normal: materialInstance->setNormal(texture); break;
+		case MaterialTextureChannel::Metallic: materialInstance->setMetallic(texture); break;
+		case MaterialTextureChannel::Roughness: materialInstance->setRoughness(texture); break;
+		case MaterialTextureChannel::AO: materialInstance->setAO(texture); break;
+		case MaterialTextureChannel::Emissive: materialInstance->setEmissive(texture); break;
+		default: break;
+		}
+	}
+
+	std::filesystem::path findProjectRoot()
+	{
+		namespace fs = std::filesystem;
+		std::error_code ec;
+		const std::vector<fs::path> roots = getAssetSearchRoots();
+		for (const fs::path& root : roots) {
+			ec.clear();
+			const bool hasSource = fs::exists(root / "source", ec) && !ec;
+			ec.clear();
+			const bool hasInclude = fs::exists(root / "include", ec) && !ec;
+			if (hasSource && hasInclude) return root;
+		}
+		for (const fs::path& root : roots) {
+			ec.clear();
+			if (fs::exists(root / "Assets", ec) && !ec) return root;
+		}
+		ec.clear();
+		return fs::current_path(ec);
+	}
+
+	bool resolveMaterialOverrideTexturePath(const std::string& serializedPath, std::filesystem::path& resolvedPath)
+	{
+		namespace fs = std::filesystem;
+		resolvedPath.clear();
+		if (serializedPath.empty()) return false;
+		const fs::path requested(serializedPath);
+		if (requested.is_absolute() && isSupportedMaterialTextureFile(requested)) {
+			resolvedPath = requested.lexically_normal();
+			return true;
+		}
+		if (isSupportedMaterialTextureFile(requested)) {
+			resolvedPath = requested.lexically_normal();
+			return true;
+		}
+		for (const fs::path& root : getAssetSearchRoots()) {
+			const fs::path candidate = root / requested;
+			if (isSupportedMaterialTextureFile(candidate)) {
+				resolvedPath = candidate.lexically_normal();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool copyMaterialTextureIntoProject(const std::filesystem::path& sourcePath,
+		int actorIndex,
+		size_t materialSlot,
+		MaterialTextureChannel channel,
+		std::filesystem::path& projectTexturePath)
+	{
+		namespace fs = std::filesystem;
+		projectTexturePath.clear();
+		if (!isSupportedMaterialTextureFile(sourcePath) || actorIndex < 0) return false;
+
+		const fs::path projectRoot = findProjectRoot();
+		if (projectRoot.empty()) return false;
+		const fs::path destinationDirectory = projectRoot / "Assets" / "Textures" / "MaterialOverrides" /
+			("Actor_" + std::to_string(actorIndex));
+		std::error_code ec;
+		fs::create_directories(destinationDirectory, ec);
+		if (ec) return false;
+
+		std::string extension = lowerAscii(sourcePath.extension().string());
+		if (extension == ".jpeg") extension = ".jpg";
+		const fs::path destination = destinationDirectory /
+			("Slot_" + std::to_string(materialSlot) + "_" + materialTextureChannelName(channel) + extension);
+
+		ec.clear();
+		const fs::path sourceAbsolute = fs::absolute(sourcePath, ec).lexically_normal();
+		ec.clear();
+		const fs::path destinationAbsolute = fs::absolute(destination, ec).lexically_normal();
+		if (lowerAscii(sourceAbsolute.generic_string()) != lowerAscii(destinationAbsolute.generic_string())) {
+			ec.clear();
+			fs::copy_file(sourcePath, destination, fs::copy_options::overwrite_existing, ec);
+			if (ec) return false;
+		}
+
+		projectTexturePath = destination.lexically_normal();
+		return isSupportedMaterialTextureFile(projectTexturePath);
+	}
+
+	std::vector<std::filesystem::path> findOBJMaterialLibraries(const std::filesystem::path& objPath)
+	{
+		std::vector<std::filesystem::path> result;
+		std::ifstream stream(objPath);
+		if (!stream.is_open()) return result;
+
+		std::string line;
+		while (std::getline(stream, line)) {
+			const std::string trimmed = trimAscii(line);
+			if (trimmed.empty() || trimmed[0] == '#') continue;
+
+			std::istringstream lineStream(trimmed);
+			std::string command;
+			lineStream >> command;
+			if (lowerAscii(command) != "mtllib") continue;
+
+			std::string remainder;
+			std::getline(lineStream, remainder);
+			remainder = trimAscii(remainder);
+			if (remainder.empty()) continue;
+
+			std::vector<std::string> libraryNames;
+			if (remainder.front() == '"') {
+				size_t cursor = 0;
+				while (cursor < remainder.size()) {
+					const size_t begin = remainder.find('"', cursor);
+					if (begin == std::string::npos) break;
+					const size_t end = remainder.find('"', begin + 1);
+					if (end == std::string::npos) break;
+					if (end > begin + 1) libraryNames.push_back(remainder.substr(begin + 1, end - begin - 1));
+					cursor = end + 1;
+				}
+			}
+			else {
+				const std::filesystem::path wholePath = objPath.parent_path() / stripOptionalQuotes(remainder);
+				if (isUsableRegularFile(wholePath)) {
+					libraryNames.push_back(stripOptionalQuotes(remainder));
+				}
+				else {
+					std::istringstream names(remainder);
+					std::string name;
+					while (names >> name) libraryNames.push_back(stripOptionalQuotes(name));
+				}
+			}
+
+			for (const std::string& libraryName : libraryNames) {
+				if (libraryName.empty()) continue;
+				std::filesystem::path candidate(libraryName);
+				if (!candidate.is_absolute()) candidate = objPath.parent_path() / candidate;
+				candidate = candidate.lexically_normal();
+				if (isUsableRegularFile(candidate)) {
+					result.push_back(candidate);
+				}
+			}
+		}
+		return result;
+	}
+
+	std::unordered_map<std::string, ObjMaterialInfo> loadOBJMaterialLibrary(const std::filesystem::path& objPath)
+	{
+		std::unordered_map<std::string, ObjMaterialInfo> materials;
+		for (const std::filesystem::path& mtlPath : findOBJMaterialLibraries(objPath)) {
+			std::ifstream stream(mtlPath);
+			if (!stream.is_open()) continue;
+
+			ObjMaterialInfo* current = nullptr;
+			std::string line;
+			while (std::getline(stream, line)) {
+				const size_t comment = line.find('#');
+				if (comment != std::string::npos) line.erase(comment);
+				line = trimAscii(line);
+				if (line.empty()) continue;
+
+				std::istringstream lineStream(line);
+				std::string command;
+				lineStream >> command;
+				const std::string lowerCommand = lowerAscii(command);
+
+				if (lowerCommand == "newmtl") {
+					std::string materialName;
+					std::getline(lineStream, materialName);
+					materialName = trimAscii(materialName);
+					if (materialName.empty()) continue;
+					ObjMaterialInfo info;
+					info.name = materialName;
+					info.sourceDirectory = mtlPath.parent_path();
+					materials[materialName] = info;
+					current = &materials[materialName];
+					continue;
+				}
+
+				if (!current) continue;
+				if (lowerCommand == "kd") {
+					lineStream >> current->baseColor.x >> current->baseColor.y >> current->baseColor.z;
+				}
+				else if (lowerCommand == "d") {
+					lineStream >> current->baseColor.w;
+					current->baseColor.w = std::clamp(current->baseColor.w, 0.0f, 1.0f);
+				}
+				else if (lowerCommand == "tr") {
+					float transparency = 0.0f;
+					if (lineStream >> transparency) current->baseColor.w = 1.0f - std::clamp(transparency, 0.0f, 1.0f);
+				}
+				else if (lowerCommand == "ns") {
+					float shininess = 0.0f;
+					if (lineStream >> shininess && !current->hasRoughnessValue) {
+						shininess = (std::max)(0.0f, shininess);
+						current->roughness = std::clamp(std::sqrt(2.0f / (shininess + 2.0f)), 0.02f, 1.0f);
+					}
+				}
+				else if (lowerCommand == "pr") {
+					if (lineStream >> current->roughness) {
+						current->roughness = std::clamp(current->roughness, 0.0f, 1.0f);
+						current->hasRoughnessValue = true;
+					}
+				}
+				else if (lowerCommand == "pm") {
+					if (lineStream >> current->metallic) {
+						current->metallic = std::clamp(current->metallic, 0.0f, 1.0f);
+						current->hasMetallicValue = true;
+					}
+				}
+				else if (lowerCommand == "ke") {
+					lineStream >> current->emissiveColor.x >> current->emissiveColor.y >> current->emissiveColor.z;
+				}
+				else if (lowerCommand == "map_kd") {
+					std::string remainder; std::getline(lineStream, remainder); current->albedoMap = parseMtlMapFilename(remainder);
+				}
+				else if (lowerCommand == "map_bump" || lowerCommand == "bump" || lowerCommand == "norm" || lowerCommand == "map_kn") {
+					std::string remainder;
+					std::getline(lineStream, remainder);
+					current->normalMap = parseMtlMapFilename(remainder);
+					current->normalScale = parseMtlBumpScale(remainder, current->normalScale);
+				}
+				else if (lowerCommand == "map_pm" || lowerCommand == "map_metallic") {
+					std::string remainder; std::getline(lineStream, remainder); current->metallicMap = parseMtlMapFilename(remainder);
+				}
+				else if (lowerCommand == "map_pr" || lowerCommand == "map_roughness") {
+					std::string remainder; std::getline(lineStream, remainder); current->roughnessMap = parseMtlMapFilename(remainder);
+				}
+				else if (lowerCommand == "map_ka" || lowerCommand == "map_ao" || lowerCommand == "map_occlusion") {
+					std::string remainder; std::getline(lineStream, remainder); current->aoMap = parseMtlMapFilename(remainder);
+				}
+				else if (lowerCommand == "map_ke" || lowerCommand == "map_emissive") {
+					std::string remainder; std::getline(lineStream, remainder); current->emissiveMap = parseMtlMapFilename(remainder);
+				}
+			}
+		}
+		return materials;
+	}
+
+	bool resolveMaterialTexturePath(const std::string& rawPath,
+		const ObjMaterialInfo& material,
+		const std::filesystem::path& objPath,
+		std::filesystem::path& resolvedPath)
+	{
+		resolvedPath.clear();
+		const std::string cleaned = stripOptionalQuotes(rawPath);
+		if (cleaned.empty()) return false;
+
+		const std::filesystem::path requested(cleaned);
+		std::vector<std::filesystem::path> candidates;
+		if (requested.is_absolute()) candidates.push_back(requested);
+		candidates.push_back(material.sourceDirectory / requested);
+		candidates.push_back(objPath.parent_path() / requested);
+
+		const std::filesystem::path filename = requested.filename();
+		const std::filesystem::path modelFolderName = objPath.stem();
+		for (const std::filesystem::path& root : getAssetSearchRoots()) {
+			candidates.push_back(root / "Assets" / "Textures" / requested);
+			if (!filename.empty()) {
+				candidates.push_back(root / "Assets" / "Textures" / modelFolderName / filename);
+				candidates.push_back(root / "Assets" / "Textures" / filename);
+				candidates.push_back(root / "Assets" / "Models" / filename);
+			}
+		}
+
+		for (const auto& candidate : candidates) {
+			if (isUsableRegularFile(candidate)) {
+				resolvedPath = candidate.lexically_normal();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	Texture* loadImportedTexture(Device& device,
+		const std::filesystem::path& texturePath,
+		std::vector<std::unique_ptr<Texture>>& ownedTextures,
+		std::unordered_map<std::string, Texture*>& loadedTextureCache)
+	{
+		if (texturePath.empty()) return nullptr;
+		const std::string key = lowerAscii(texturePath.lexically_normal().generic_string());
+		auto found = loadedTextureCache.find(key);
+		if (found != loadedTextureCache.end()) return found->second;
+
+		auto texture = std::make_unique<Texture>();
+		const std::string extension = lowerAscii(texturePath.extension().string());
+		const ExtensionType type = extension == ".dds" ? DDS : PNG;
+		const HRESULT hr = texture->init(device, texturePath.string(), type);
+		if (FAILED(hr)) {
+			const std::wstring pathW(texturePath.wstring());
+			MESSAGE("Main", "OBJMaterial", L"Texture could not be loaded; fallback will be used: " << pathW);
+			return nullptr;
+		}
+
+		Texture* raw = texture.get();
+		ownedTextures.push_back(std::move(texture));
+		loadedTextureCache[key] = raw;
+		return raw;
+	}
+
+	SimpleVertex makeVertex(float px, float py, float pz,
+		float nx, float ny, float nz,
+		float tx, float ty, float tz,
+		float bx, float by, float bz,
+		float u, float v)
+	{
+		SimpleVertex vertex{};
+		vertex.Position = EU::Vector3(px, py, pz);
+		vertex.Normal = EU::Vector3(nx, ny, nz);
+		vertex.Tangent = EU::Vector3(tx, ty, tz);
+		vertex.Bitangent = EU::Vector3(bx, by, bz);
+		vertex.TextureCoordinate = EU::Vector2(u, v);
+		return vertex;
+	}
+
+	void addQuad(MeshComponent& mesh,
+		const std::array<EU::Vector3, 4>& positions,
+		const EU::Vector3& normal,
+		const EU::Vector3& tangent,
+		const EU::Vector3& bitangent)
+	{
+		const unsigned int base = static_cast<unsigned int>(mesh.m_vertex.size());
+		const std::array<EU::Vector2, 4> uv = {
+			EU::Vector2(0.0f, 1.0f), EU::Vector2(0.0f, 0.0f),
+			EU::Vector2(1.0f, 0.0f), EU::Vector2(1.0f, 1.0f)
+		};
+		for (size_t i = 0; i < positions.size(); ++i) {
+			mesh.m_vertex.push_back(makeVertex(
+				positions[i].x, positions[i].y, positions[i].z,
+				normal.x, normal.y, normal.z,
+				tangent.x, tangent.y, tangent.z,
+				bitangent.x, bitangent.y, bitangent.z,
+				uv[i].x, uv[i].y));
+		}
+		mesh.m_index.insert(mesh.m_index.end(), {
+			base + 0, base + 1, base + 2,
+			base + 0, base + 2, base + 3
+		});
+	}
+
+	MeshComponent makeDemoCube()
+	{
+		MeshComponent mesh;
+		mesh.m_name = "BuiltinCube";
+		constexpr float h = 1.0f;
+
+		addQuad(mesh, { EU::Vector3(-h,-h,-h), EU::Vector3(-h, h,-h), EU::Vector3( h, h,-h), EU::Vector3( h,-h,-h) },
+			EU::Vector3(0,0,-1), EU::Vector3(1,0,0), EU::Vector3(0,1,0));
+		addQuad(mesh, { EU::Vector3( h,-h, h), EU::Vector3( h, h, h), EU::Vector3(-h, h, h), EU::Vector3(-h,-h, h) },
+			EU::Vector3(0,0,1), EU::Vector3(-1,0,0), EU::Vector3(0,1,0));
+		addQuad(mesh, { EU::Vector3(-h,-h, h), EU::Vector3(-h, h, h), EU::Vector3(-h, h,-h), EU::Vector3(-h,-h,-h) },
+			EU::Vector3(-1,0,0), EU::Vector3(0,0,-1), EU::Vector3(0,1,0));
+		addQuad(mesh, { EU::Vector3( h,-h,-h), EU::Vector3( h, h,-h), EU::Vector3( h, h, h), EU::Vector3( h,-h, h) },
+			EU::Vector3(1,0,0), EU::Vector3(0,0,1), EU::Vector3(0,1,0));
+		addQuad(mesh, { EU::Vector3(-h, h,-h), EU::Vector3(-h, h, h), EU::Vector3( h, h, h), EU::Vector3( h, h,-h) },
+			EU::Vector3(0,1,0), EU::Vector3(1,0,0), EU::Vector3(0,0,-1));
+		addQuad(mesh, { EU::Vector3(-h,-h, h), EU::Vector3(-h,-h,-h), EU::Vector3( h,-h,-h), EU::Vector3( h,-h, h) },
+			EU::Vector3(0,-1,0), EU::Vector3(1,0,0), EU::Vector3(0,0,1));
+
+		mesh.m_numVertex = static_cast<int>(mesh.m_vertex.size());
+		mesh.m_numIndex = static_cast<int>(mesh.m_index.size());
+		return mesh;
+	}
+
+	EU::Vector3 normalizedCross(const EU::Vector3& a, const EU::Vector3& b)
+	{
+		const EU::Vector3 c(
+			a.y * b.z - a.z * b.y,
+			a.z * b.x - a.x * b.z,
+			a.x * b.y - a.y * b.x);
+		const float lenSq = c.x * c.x + c.y * c.y + c.z * c.z;
+		if (lenSq <= 1e-12f) return EU::Vector3(0, 1, 0);
+		const float invLen = 1.0f / std::sqrt(lenSq);
+		return c * invLen;
+	}
+
+	void addTriangle(MeshComponent& mesh,
+		const EU::Vector3& a, const EU::Vector3& b, const EU::Vector3& c)
+	{
+		const EU::Vector3 edge1 = b - a;
+		const EU::Vector3 edge2 = c - a;
+		const EU::Vector3 normal = normalizedCross(edge1, edge2);
+		const float tangentLenSq = edge1.x * edge1.x + edge1.y * edge1.y + edge1.z * edge1.z;
+		EU::Vector3 tangent = tangentLenSq > 1e-12f
+			? edge1 * (1.0f / std::sqrt(tangentLenSq))
+			: EU::Vector3(1,0,0);
+		EU::Vector3 bitangent = normalizedCross(normal, tangent);
+
+		const unsigned int base = static_cast<unsigned int>(mesh.m_vertex.size());
+		mesh.m_vertex.push_back(makeVertex(a.x,a.y,a.z, normal.x,normal.y,normal.z, tangent.x,tangent.y,tangent.z, bitangent.x,bitangent.y,bitangent.z, 0.0f,1.0f));
+		mesh.m_vertex.push_back(makeVertex(b.x,b.y,b.z, normal.x,normal.y,normal.z, tangent.x,tangent.y,tangent.z, bitangent.x,bitangent.y,bitangent.z, 0.5f,0.0f));
+		mesh.m_vertex.push_back(makeVertex(c.x,c.y,c.z, normal.x,normal.y,normal.z, tangent.x,tangent.y,tangent.z, bitangent.x,bitangent.y,bitangent.z, 1.0f,1.0f));
+		mesh.m_index.insert(mesh.m_index.end(), { base, base + 1, base + 2 });
+	}
+
+	MeshComponent makeDemoPyramid()
+	{
+		MeshComponent mesh;
+		mesh.m_name = "BuiltinPyramid";
+		const EU::Vector3 p0(-1.0f, 0.0f,-1.0f);
+		const EU::Vector3 p1(-1.0f, 0.0f, 1.0f);
+		const EU::Vector3 p2( 1.0f, 0.0f, 1.0f);
+		const EU::Vector3 p3( 1.0f, 0.0f,-1.0f);
+		const EU::Vector3 top(0.0f, 2.2f, 0.0f);
+
+		addTriangle(mesh, p0, top, p1);
+		addTriangle(mesh, p1, top, p2);
+		addTriangle(mesh, p2, top, p3);
+		addTriangle(mesh, p3, top, p0);
+		addTriangle(mesh, p0, p1, p2);
+		addTriangle(mesh, p0, p2, p3);
+
+		mesh.m_numVertex = static_cast<int>(mesh.m_vertex.size());
+		mesh.m_numIndex = static_cast<int>(mesh.m_index.size());
+		return mesh;
+	}
+
+	MeshComponent makeDemoFloor()
+	{
+		MeshComponent mesh;
+		mesh.m_name = "BuiltinFloor";
+		const float x = 7.0f;
+		const float z = 7.0f;
+		addQuad(mesh, { EU::Vector3(-x,0,-z), EU::Vector3(-x,0, z), EU::Vector3( x,0, z), EU::Vector3( x,0,-z) },
+			EU::Vector3(0,1,0), EU::Vector3(1,0,0), EU::Vector3(0,0,1));
+		// Reversed winding makes the floor visible even if the current rasterizer
+		// considers the opposite orientation to be the front face.
+		mesh.m_index.insert(mesh.m_index.end(), { 0, 2, 1, 0, 3, 2 });
+		mesh.m_numVertex = static_cast<int>(mesh.m_vertex.size());
+		mesh.m_numIndex = static_cast<int>(mesh.m_index.size());
+		return mesh;
+	}
+
+	HRESULT uploadBuiltinMesh(Device& device, const MeshComponent& source, Mesh& destination)
+	{
+		destination.destroy();
+		Submesh submesh{};
+		HRESULT hr = submesh.vertexBuffer.init(device, source, D3D11_BIND_VERTEX_BUFFER);
+		if (FAILED(hr)) return hr;
+		hr = submesh.indexBuffer.init(device, source, D3D11_BIND_INDEX_BUFFER);
+		if (FAILED(hr)) return hr;
+		submesh.indexCount = static_cast<unsigned int>(source.m_index.size());
+		submesh.localTransform = source.m_localTransform;
+		submesh.materialSlot = 0;
+		destination.getSubmeshes().push_back(std::move(submesh));
+		return S_OK;
+	}
+
+	HRESULT uploadImportedMeshes(Device& device, const std::vector<MeshComponent>& sources, Mesh& destination)
+	{
+		destination.destroy();
+		if (sources.empty()) {
+			return E_INVALIDARG;
+		}
+
+		for (const MeshComponent& source : sources) {
+			if (source.m_vertex.empty() || source.m_index.empty()) {
+				continue;
+			}
+
+			Submesh submesh{};
+			HRESULT hr = submesh.vertexBuffer.init(device, source, D3D11_BIND_VERTEX_BUFFER);
+			if (FAILED(hr)) {
+				destination.destroy();
+				return hr;
+			}
+
+			hr = submesh.indexBuffer.init(device, source, D3D11_BIND_INDEX_BUFFER);
+			if (FAILED(hr)) {
+				destination.destroy();
+				return hr;
+			}
+
+			submesh.indexCount = static_cast<unsigned int>(source.m_index.size());
+			submesh.localTransform = source.m_localTransform;
+			submesh.materialSlot = static_cast<unsigned int>(destination.getSubmeshes().size());
+			destination.getSubmeshes().push_back(std::move(submesh));
+		}
+
+		return destination.getSubmeshes().empty() ? E_FAIL : S_OK;
+	}
+
+	bool computeImportedPlacement(const std::vector<MeshComponent>& meshes, EU::Vector3& outPosition, EU::Vector3& outScale)
+	{
+		float minX = (std::numeric_limits<float>::max)();
+		float minY = (std::numeric_limits<float>::max)();
+		float minZ = (std::numeric_limits<float>::max)();
+		float maxX = -(std::numeric_limits<float>::max)();
+		float maxY = -(std::numeric_limits<float>::max)();
+		float maxZ = -(std::numeric_limits<float>::max)();
+		bool hasVertices = false;
+
+		for (const MeshComponent& mesh : meshes) {
+			for (const SimpleVertex& vertex : mesh.m_vertex) {
+				const EU::Vector3& p = vertex.Position;
+				if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+					continue;
+				}
+				minX = (std::min)(minX, p.x);
+				minY = (std::min)(minY, p.y);
+				minZ = (std::min)(minZ, p.z);
+				maxX = (std::max)(maxX, p.x);
+				maxY = (std::max)(maxY, p.y);
+				maxZ = (std::max)(maxZ, p.z);
+				hasVertices = true;
+			}
+		}
+
+		if (!hasVertices) {
+			return false;
+		}
+
+		const float extentX = maxX - minX;
+		const float extentY = maxY - minY;
+		const float extentZ = maxZ - minZ;
+		const float maxExtent = (std::max)(extentX, (std::max)(extentY, extentZ));
+		if (!std::isfinite(maxExtent) || maxExtent <= 1e-6f) {
+			return false;
+		}
+
+		float uniformScale = 2.5f / maxExtent;
+		uniformScale = (std::max)(0.0001f, (std::min)(uniformScale, 1000.0f));
+		const float centerX = (minX + maxX) * 0.5f;
+		const float centerZ = (minZ + maxZ) * 0.5f;
+
+		outScale = EU::Vector3(uniformScale, uniformScale, uniformScale);
+		outPosition = EU::Vector3(
+			-centerX * uniformScale,
+			-minY * uniformScale,
+			4.0f - centerZ * uniformScale);
+		return true;
+	}
+
+	bool attachRenderer(const EU::TSharedPointer<Actor>& actor, Mesh& mesh, MaterialInstance& material, bool castShadow)
+	{
+		if (actor.isNull()) return false;
+		EU::TSharedPointer<MeshRendererComponent> renderer = actor->getComponent<MeshRendererComponent>();
+		if (!renderer) {
+			renderer = EU::MakeShared<MeshRendererComponent>();
+			actor->addComponent(renderer);
+		}
+		renderer->setMesh(&mesh);
+		renderer->setMaterialInstance(&material);
+		renderer->setVisible(true);
+		renderer->setCastShadow(castShadow);
+		return true;
+	}
+
+	bool attachRenderer(const EU::TSharedPointer<Actor>& actor, Mesh& mesh, const std::vector<MaterialInstance*>& materials, bool castShadow)
+	{
+		if (actor.isNull() || materials.empty()) return false;
+		EU::TSharedPointer<MeshRendererComponent> renderer = actor->getComponent<MeshRendererComponent>();
+		if (!renderer) {
+			renderer = EU::MakeShared<MeshRendererComponent>();
+			actor->addComponent(renderer);
+		}
+		renderer->setMesh(&mesh);
+		renderer->setMaterialInstances(materials);
+		renderer->setVisible(true);
+		renderer->setCastShadow(castShadow);
+		return true;
 	}
 }
 
@@ -69,7 +966,10 @@ BaseApp::run(HINSTANCE hInst, int nCmdShow) {
 		return 0;
 	}
 	// 4) Initialize GUI
-	m_gui.init(m_window, m_device, m_deviceContext);
+	if (!m_gui.init(m_window, m_device, m_deviceContext)) {
+		ERROR("Main", "Run", "Failed to initialize ImGui Win32/DX11 backends.");
+		return 0;
+	}
 	m_guiInitialized = true;
 
 	// Main message loop
@@ -106,7 +1006,7 @@ BaseApp::init() {
 
 	if (FAILED(hr)) {
 		ERROR("Main", "InitDevice",
-			("Failed to initialize SwpaChian. HRESULT: " + std::to_string(hr)).c_str());
+			("Failed to initialize SwapChain. HRESULT: " + std::to_string(hr)).c_str());
 		return hr;
 	}
 
@@ -120,13 +1020,16 @@ BaseApp::init() {
 	}
 
 	// Crear textura de depth stencil
+	D3D11_TEXTURE2D_DESC backBufferDesc{};
+	if (!m_backBuffer.m_texture) return E_POINTER;
+	m_backBuffer.m_texture->GetDesc(&backBufferDesc);
 	hr = m_depthStencil.init(m_device,
 		m_window.m_width,
 		m_window.m_height,
 		DXGI_FORMAT_D24_UNORM_S8_UINT,
 		D3D11_BIND_DEPTH_STENCIL,
-		4,
-		0);
+		backBufferDesc.SampleDesc.Count,
+		backBufferDesc.SampleDesc.Quality);
 
 	if (FAILED(hr)) {
 		ERROR("Main", "InitDevice",
@@ -153,10 +1056,10 @@ BaseApp::init() {
 			("Failed to initialize Viewport. HRESULT: " + std::to_string(hr)).c_str());
 		return hr;
 	}
-	m_d3dReady = true;
 
-	// Load Resources -> Modelos, Texturas e Interfaz de usuario
-	std::array<std::string, 6> faces = {
+	// Optional external resources. The editor must still start when these files
+	// are absent; demo geometry below is generated entirely in memory.
+	std::array<std::string, 6> requestedFaces = {
 		"Skybox/cubemap_0.png",
 		"Skybox/cubemap_1.png",
 		"Skybox/cubemap_2.png",
@@ -164,226 +1067,52 @@ BaseApp::init() {
 		"Skybox/cubemap_4.png",
 		"Skybox/cubemap_5.png"
 	};
-	m_skyboxTex.CreateCubemap(m_device, m_deviceContext, faces, false);
-	HRESULT lightIconHr = m_lightIconTexture.init(m_device, "slate/icons/light-bulb", PNG);
-	if (FAILED(lightIconHr)) {
-		MESSAGE("Main", "InitDevice", "Light actor icon not found. Continuing with fallback light marker.");
+	std::array<std::string, 6> resolvedFaces{};
+	bool hasAllSkyboxFaces = true;
+	for (size_t i = 0; i < requestedFaces.size(); ++i) {
+		if (!resolveOptionalAssetPath(requestedFaces[i], resolvedFaces[i])) {
+			hasAllSkyboxFaces = false;
+			break;
+		}
 	}
 
-	// Set CyberGun Actor
-	m_cyberGun = EU::MakeShared<Actor>(m_device);
-	m_drakefirePistol = EU::MakeShared<Actor>(m_device);
-	m_sciFiToad = EU::MakeShared<Actor>(m_device);
-
-	if (!m_cyberGun.isNull()) {
-		m_model = new Model3D("CyberGun.fbx", ModelType::FBX);
-		if (!m_model || !m_model->load("CyberGun.fbx")) {
-			ERROR("Main", "InitDevice", "Failed to load CyberGun model.");
-			return E_FAIL;
-		}
-
-		hr = m_AlbedoSRV.init(m_device, "Textures/CyberGun/base.tga", PNG);
+	m_skyboxReady = false;
+	if (hasAllSkyboxFaces) {
+		hr = m_skyboxTex.CreateCubemap(m_device, m_deviceContext, resolvedFaces, false);
 		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize DrakePistol Texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
+			MESSAGE("Main", "InitDevice", "Optional skybox could not be created. Continuing without skybox.");
+			hr = S_OK;
 		}
-		hr = m_MetallicSRV.init(m_device, "Textures/CyberGun/metallic.tga", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize DrakePistol Texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_RoughnessSRV.init(m_device, "Textures/CyberGun/roughness.tga", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize DrakePistol Texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_AOSRV.init(m_device, "Textures/CyberGun/ao.tga", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize DrakePistol Texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_NormalSRV.init(m_device, "Textures/CyberGun/normal.tga", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize DrakePistol Texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		HRESULT emissiveHr = m_EmissiveSRV.init(m_device, "Textures/CyberGun/Emissive.tga", PNG);
-		if (FAILED(emissiveHr)) {
-			MESSAGE("Main", "InitDevice", "CyberGun emissive texture not found. Continuing without emissive map.");
-		}
-		m_cyberGun->setName("CyberGun");
-		m_actors.push_back(m_cyberGun);
-
-		m_cyberGun->getComponent<Transform>()->setTransform(EU::Vector3(2.0f, -1.90f, 11.60f),
-			EU::Vector3(-0.60f, 3.0f, -0.20f),
-			EU::Vector3(1.0f, 1.0f, 1.0f));
 	}
 	else {
-		ERROR("Main", "InitDevice", "Failed to create cyber Gun Actor.");
-		return E_FAIL;
+		MESSAGE("Main", "InitDevice", "No skybox files found. Using the editor clear color instead.");
 	}
 
-	if (!m_drakefirePistol.isNull()) {
-		m_drakefireModel = new Model3D("Models/drakefire_pistol_low_OBJ/drakefire_pistol_low.obj", ModelType::OBJ);
-		if (!m_drakefireModel || !m_drakefireModel->load("Models/drakefire_pistol_low_OBJ/drakefire_pistol_low.obj")) {
-			ERROR("Main", "InitDevice", "Failed to load Drakefire pistol model.");
-			return E_FAIL;
+	std::string lightIconPath;
+	if (resolveOptionalAssetPath("slate/icons/light-bulb.png", lightIconPath)) {
+		const HRESULT lightIconHr = m_lightIconTexture.init(m_device, lightIconPath, PNG);
+		if (FAILED(lightIconHr)) {
+			MESSAGE("Main", "InitDevice", "Light icon could not be loaded. Using the fallback marker.");
 		}
-
-		hr = m_drakefireAlbedoSRV.init(m_device, "Textures/drakefire_pistol_low_Textures/base_albedo", JPG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Drakefire albedo texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_drakefireNormalSRV.init(m_device, "Textures/drakefire_pistol_low_Textures/base_normal", JPG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Drakefire normal texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_drakefireMetallicSRV.init(m_device, "Textures/drakefire_pistol_low_Textures/base_metallic", JPG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Drakefire metallic texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_drakefireRoughnessSRV.init(m_device, "Textures/drakefire_pistol_low_Textures/base_roughness", JPG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Drakefire roughness texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_drakefireAOSRV.init(m_device, "Textures/drakefire_pistol_low_Textures/base_AO", JPG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Drakefire AO texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-
-		m_drakefirePistol->setName("Drakefire Pistol");
-		m_actors.push_back(m_drakefirePistol);
-		m_drakefirePistol->getComponent<Transform>()->setTransform(EU::Vector3(-2.5f, -1.90f, 9.5f),
-			EU::Vector3(-0.30f, 0.45f, 0.0f),
-			EU::Vector3(1.0f, 1.0f, 1.0f));
-	}
-	else {
-		ERROR("Main", "InitDevice", "Failed to create Drakefire pistol Actor.");
-		return E_FAIL;
 	}
 
-	if (!m_sciFiToad.isNull()) {
-		m_toadModel = new Model3D("Models/Bake_Sci-fiToad.fbx", ModelType::FBX);
-		if (!m_toadModel || !m_toadModel->load("Models/Bake_Sci-fiToad.fbx")) {
-			ERROR("Main", "InitDevice", "Failed to load Sci-Fi Toad model.");
-			return E_FAIL;
-		}
-
-		hr = m_toadAlbedoSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_BC", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad albedo texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadNormalSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_N", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad normal texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadMetallicSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_M", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad metallic texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadRoughnessSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_R", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad roughness texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadAOSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Body_AO", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad AO texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadGlassAlbedoSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Glass_BC", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad glass albedo texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadGlassNormalSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Glass_N", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad glass normal texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadGlassRoughnessSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Glass_R", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad glass roughness texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadHeadAlbedoSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Head_BC", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad head albedo texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadHeadNormalSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Head_N", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad head normal texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-		hr = m_toadHeadRoughnessSRV.init(m_device, "Textures/Sci-FIToad/Sci-FIToad_Head_R", PNG);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad head roughness texture. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-
-		m_sciFiToad->setName("Sci-Fi Toad");
-		m_actors.push_back(m_sciFiToad);
-		m_sciFiToad->getComponent<Transform>()->setTransform(EU::Vector3(0.0f, -1.90f, 10.5f),
-			EU::Vector3(0.0f, 3.14f, 0.0f),
-			EU::Vector3(1.0f, 1.0f, 1.0f));
-	}
-	else {
-		ERROR("Main", "InitDevice", "Failed to create Sci-Fi Toad Actor.");
-		return E_FAIL;
-	}
-
-	// Store the Actors in the Scene Graph
-	for (auto& actor : m_actors) {
-		m_sceneGraph.addEntity(actor.get());
-	}
-
+	// Input layout used by the PBR material shader. ShaderProgram resolves
+	// files from the project Shaders/ folder as well as the current directory.
 	LayoutBuilder builder;
-
 	builder.Add("POSITION", DXGI_FORMAT_R32G32B32_FLOAT)
 		.Add("NORMAL", DXGI_FORMAT_R32G32B32_FLOAT)
 		.Add("TANGENT", DXGI_FORMAT_R32G32B32_FLOAT)
 		.Add("BITANGENT", DXGI_FORMAT_R32G32B32_FLOAT)
 		.Add("TEXCOORD", DXGI_FORMAT_R32G32_FLOAT);
 
-	// Create the Shader Program
 	hr = m_shaderProgram.init(m_device, "PBRShader.hlsl", builder);
 	if (FAILED(hr)) {
 		ERROR("Main", "InitDevice",
-			("Failed to initialize ShaderProgram. HRESULT: " + std::to_string(hr)).c_str());
+			("Failed to initialize PBRShader. Verify the Shaders folder. HRESULT: " + std::to_string(hr)).c_str());
 		return hr;
 	}
 
-	// Create the constant buffers
+	// Constant buffer retained for the legacy path and editor compatibility.
 	hr = m_constantBuffer.init(m_device, sizeof(CBMain));
 	if (FAILED(hr)) {
 		ERROR("Main", "InitDevice",
@@ -391,48 +1120,37 @@ BaseApp::init() {
 		return hr;
 	}
 
+	// Put the camera where all generated demo objects are visible on first boot.
 	m_camera.setLens(XM_PIDIV4, m_window.m_width / (float)m_window.m_height, 0.01f, 100.0f);
-	m_camera.setPosition(0.0f, 3.0f, -6.0f);
+	m_camera.lookAt(
+		EU::Vector3(0.0f, 3.5f, -8.0f),
+		EU::Vector3(0.0f, 1.0f, 4.0f),
+		EU::Vector3(0.0f, 1.0f, 0.0f));
+	m_camera.updateViewMatrix();
 
 	m_constantBufferStruct.LightColor = EU::Vector3(1.0f, 1.0f, 1.0f);
-	m_constantBufferStruct.LightDir = EU::Vector3(-0.20f, -1.0f, 1.0f);
+	m_constantBufferStruct.LightDir = EU::Vector3(-0.35f, -1.0f, 0.35f);
 
-	// Initialize the Skybox pass -> Carga de textura + creacion de buffers/shaders especificos para el skybox
-	m_skybox.init(m_device, &m_deviceContext, m_skyboxTex);
-
-	// Initialize default states (Rasterizer, DepthStencil)
-	hr = m_defaultRasterizer.init(m_device, D3D11_FILL_SOLID, D3D11_CULL_BACK, false, true);
-	if (FAILED(hr)) {
-		ERROR("Main", "InitDevice",
-			("Failed to initialize default Rasterizer. HRESULT: " + std::to_string(hr)).c_str());
-		return hr;
+	// Initialize the optional skybox only after a valid cubemap exists.
+	if (m_skyboxTex.m_textureFromImg) {
+		hr = m_skybox.init(m_device, &m_deviceContext, m_skyboxTex);
+		if (FAILED(hr)) {
+			MESSAGE("Main", "InitDevice", "Skybox resources failed. Continuing without skybox.");
+			m_skyboxReady = false;
+			hr = S_OK;
+		}
+		else {
+			m_skyboxReady = true;
+		}
 	}
+
+	// Default pipeline states.
+	hr = m_defaultRasterizer.init(m_device, D3D11_FILL_SOLID, D3D11_CULL_NONE, false, true);
+	if (FAILED(hr)) return hr;
 	hr = m_defaultDepthStencil.init(m_device, true, D3D11_DEPTH_WRITE_MASK_ALL, D3D11_COMPARISON_LESS);
-	if (FAILED(hr)) {
-		ERROR("Main", "InitDevice",
-			("Failed to initialize default DepthStencilState. HRESULT: " + std::to_string(hr)).c_str());
-		return hr;
-	}
+	if (FAILED(hr)) return hr;
 	hr = m_defaultSampler.init(m_device);
-	if (FAILED(hr)) {
-		ERROR("Main", "InitDevice",
-			("Failed to initialize default SamplerState. HRESULT: " + std::to_string(hr)).c_str());
-		return hr;
-	}
-
-	m_pbrMaterial.setShader(&m_shaderProgram);
-	m_pbrMaterial.setRasterizerState(&m_defaultRasterizer);
-	m_pbrMaterial.setDepthStencilState(&m_defaultDepthStencil);
-	m_pbrMaterial.setSamplerState(&m_defaultSampler);
-	m_pbrMaterial.setDomain(MaterialDomain::Opaque);
-	m_pbrMaterial.setBlendMode(BlendMode::Opaque);
-
-	m_transparentPbrMaterial.setShader(&m_shaderProgram);
-	m_transparentPbrMaterial.setRasterizerState(&m_defaultRasterizer);
-	m_transparentPbrMaterial.setDepthStencilState(&m_defaultDepthStencil);
-	m_transparentPbrMaterial.setSamplerState(&m_defaultSampler);
-	m_transparentPbrMaterial.setDomain(MaterialDomain::Transparent);
-	m_transparentPbrMaterial.setBlendMode(BlendMode::Alpha);
+	if (FAILED(hr)) return hr;
 
 	auto configurePbrMaterial = [&](Material& material) {
 		material.setShader(&m_shaderProgram);
@@ -441,193 +1159,102 @@ BaseApp::init() {
 		material.setSamplerState(&m_defaultSampler);
 		material.setDomain(MaterialDomain::Opaque);
 		material.setBlendMode(BlendMode::Opaque);
-		};
-
+	};
+	configurePbrMaterial(m_pbrMaterial);
+	configurePbrMaterial(m_transparentPbrMaterial);
+	m_transparentPbrMaterial.setDomain(MaterialDomain::Transparent);
+	m_transparentPbrMaterial.setBlendMode(BlendMode::Alpha);
 	configurePbrMaterial(m_cyberGunPbrMaterial);
 	configurePbrMaterial(m_drakefirePbrMaterial);
 	configurePbrMaterial(m_toadPbrMaterial);
-	configurePbrMaterial(m_toadGlassPbrMaterial);
-	configurePbrMaterial(m_toadHeadPbrMaterial);
-	m_toadGlassPbrMaterial.setDomain(MaterialDomain::Transparent);
-	m_toadGlassPbrMaterial.setBlendMode(BlendMode::Alpha);
 
-	m_cyberGunMaterial.setMaterial(&m_cyberGunPbrMaterial);
-	m_cyberGunMaterial.setAlbedo(&m_AlbedoSRV);
-	m_cyberGunMaterial.setNormal(&m_NormalSRV);
-	m_cyberGunMaterial.setMetallic(&m_MetallicSRV);
-	m_cyberGunMaterial.setRoughness(&m_RoughnessSRV);
-	m_cyberGunMaterial.setAO(&m_AOSRV);
-	if (m_EmissiveSRV.m_textureFromImg) {
-		m_cyberGunMaterial.setEmissive(&m_EmissiveSRV);
-	}
-	m_cyberGunMaterial.getParams().baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-	m_cyberGunMaterial.getParams().metallic = 1.0f;
-	m_cyberGunMaterial.getParams().roughness = 1.0f;
-	m_cyberGunMaterial.getParams().ao = 1.0f;
-	m_cyberGunMaterial.getParams().normalScale = 1.0f;
-	m_cyberGunMaterial.getParams().emissiveStrength = 1.0f;
-	m_cyberGunMaterial.getParams().alphaCutoff = 0.5f;
-
-	m_drakefireMaterial.setMaterial(&m_drakefirePbrMaterial);
-	m_drakefireMaterial.setAlbedo(&m_drakefireAlbedoSRV);
-	m_drakefireMaterial.setNormal(&m_drakefireNormalSRV);
-	m_drakefireMaterial.setMetallic(&m_drakefireMetallicSRV);
-	m_drakefireMaterial.setRoughness(&m_drakefireRoughnessSRV);
-	m_drakefireMaterial.setAO(&m_drakefireAOSRV);
-	m_drakefireMaterial.getParams().baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-	m_drakefireMaterial.getParams().metallic = 1.0f;
-	m_drakefireMaterial.getParams().roughness = 1.0f;
-	m_drakefireMaterial.getParams().ao = 1.0f;
-	m_drakefireMaterial.getParams().normalScale = 1.0f;
-	m_drakefireMaterial.getParams().alphaCutoff = 0.5f;
-
-	m_toadMaterial.setMaterial(&m_toadPbrMaterial);
-	m_toadMaterial.setAlbedo(&m_toadAlbedoSRV);
-	m_toadMaterial.setNormal(&m_toadNormalSRV);
-	m_toadMaterial.setMetallic(&m_toadMetallicSRV);
-	m_toadMaterial.setRoughness(&m_toadRoughnessSRV);
-	m_toadMaterial.setAO(&m_toadAOSRV);
-	m_toadMaterial.getParams().baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-	m_toadMaterial.getParams().metallic = 1.0f;
-	m_toadMaterial.getParams().roughness = 1.0f;
-	m_toadMaterial.getParams().ao = 1.0f;
-	m_toadMaterial.getParams().normalScale = 1.0f;
-	m_toadMaterial.getParams().alphaCutoff = 0.5f;
-
-	m_toadGlassMaterial.setMaterial(&m_toadGlassPbrMaterial);
-	m_toadGlassMaterial.setAlbedo(&m_toadGlassAlbedoSRV);
-	m_toadGlassMaterial.setNormal(&m_toadGlassNormalSRV);
-	m_toadGlassMaterial.setRoughness(&m_toadGlassRoughnessSRV);
-	m_toadGlassMaterial.getParams().baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 0.35f);
-	m_toadGlassMaterial.getParams().metallic = 0.0f;
-	m_toadGlassMaterial.getParams().roughness = 0.25f;
-	m_toadGlassMaterial.getParams().ao = 1.0f;
-	m_toadGlassMaterial.getParams().normalScale = 1.0f;
-	m_toadGlassMaterial.getParams().alphaCutoff = 0.5f;
-
-	m_toadHeadMaterial.setMaterial(&m_toadHeadPbrMaterial);
-	m_toadHeadMaterial.setAlbedo(&m_toadHeadAlbedoSRV);
-	m_toadHeadMaterial.setNormal(&m_toadHeadNormalSRV);
-	m_toadHeadMaterial.setRoughness(&m_toadHeadRoughnessSRV);
-	m_toadHeadMaterial.getParams().baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-	m_toadHeadMaterial.getParams().metallic = 0.0f;
-	m_toadHeadMaterial.getParams().roughness = 1.0f;
-	m_toadHeadMaterial.getParams().ao = 1.0f;
-	m_toadHeadMaterial.getParams().normalScale = 1.0f;
-	m_toadHeadMaterial.getParams().alphaCutoff = 0.5f;
-
-	m_cyberGunRenderMesh.destroy();
-	for (const MeshComponent& meshComponent : m_model->GetMeshes()) {
-		Submesh submesh{};
-		hr = submesh.vertexBuffer.init(m_device, meshComponent, D3D11_BIND_VERTEX_BUFFER);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize CyberGun vertex buffer. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-
-		hr = submesh.indexBuffer.init(m_device, meshComponent, D3D11_BIND_INDEX_BUFFER);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize CyberGun index buffer. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
-
-		submesh.indexCount = meshComponent.m_numIndex;
-		submesh.localTransform = meshComponent.m_localTransform;
-		submesh.materialSlot = 0;
-		m_cyberGunRenderMesh.getSubmeshes().push_back(std::move(submesh));
+	// Generated 1x1 PBR textures remove all dependency on image files.
+	if (FAILED(m_AlbedoSRV.initSolidColor(m_device, 255, 255, 255, 255)) ||
+		FAILED(m_NormalSRV.initSolidColor(m_device, 128, 128, 255, 255)) ||
+		FAILED(m_MetallicSRV.initSolidColor(m_device, 0, 0, 0, 255)) ||
+		FAILED(m_RoughnessSRV.initSolidColor(m_device, 170, 170, 170, 255)) ||
+		FAILED(m_AOSRV.initSolidColor(m_device, 255, 255, 255, 255)) ||
+		FAILED(m_EmissiveSRV.initSolidColor(m_device, 0, 0, 0, 255))) {
+		ERROR("Main", "InitDevice", "Failed to create generated PBR fallback textures.");
+		return E_FAIL;
 	}
 
-	m_drakefireRenderMesh.destroy();
-	for (const MeshComponent& meshComponent : m_drakefireModel->GetMeshes()) {
-		Submesh submesh{};
-		hr = submesh.vertexBuffer.init(m_device, meshComponent, D3D11_BIND_VERTEX_BUFFER);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Drakefire vertex buffer. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
+	auto configureGeneratedInstance = [&](MaterialInstance& instance, Material& material, const XMFLOAT4& color, float metallic, float roughness) {
+		instance.setMaterial(&material);
+		instance.setAlbedo(&m_AlbedoSRV);
+		instance.setNormal(&m_NormalSRV);
+		instance.setMetallic(&m_MetallicSRV);
+		instance.setRoughness(&m_RoughnessSRV);
+		instance.setAO(&m_AOSRV);
+		instance.setEmissive(&m_EmissiveSRV);
+		instance.getParams().baseColor = color;
+		instance.getParams().metallic = metallic;
+		instance.getParams().roughness = roughness;
+		instance.getParams().ao = 1.0f;
+		instance.getParams().normalScale = 1.0f;
+		instance.getParams().emissiveStrength = 0.0f;
+		instance.getParams().alphaCutoff = 0.5f;
+	};
 
-		hr = submesh.indexBuffer.init(m_device, meshComponent, D3D11_BIND_INDEX_BUFFER);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Drakefire index buffer. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
+	configureGeneratedInstance(m_cyberGunMaterial, m_cyberGunPbrMaterial,
+		XMFLOAT4(0.95f, 0.22f, 0.12f, 1.0f), 0.15f, 0.35f);
+	configureGeneratedInstance(m_drakefireMaterial, m_drakefirePbrMaterial,
+		XMFLOAT4(0.08f, 0.42f, 0.95f, 1.0f), 0.05f, 0.28f);
+	configureGeneratedInstance(m_toadMaterial, m_toadPbrMaterial,
+		XMFLOAT4(0.42f, 0.44f, 0.48f, 1.0f), 0.0f, 0.82f);
 
-		submesh.indexCount = meshComponent.m_numIndex;
-		submesh.localTransform = meshComponent.m_localTransform;
-		submesh.materialSlot = 0;
-		m_drakefireRenderMesh.getSubmeshes().push_back(std::move(submesh));
+	// Built-in scene: cube + pyramid + floor. These meshes are generated in
+	// memory so an empty Assets/Models folder can never prevent startup.
+	m_cyberGun = EU::MakeShared<Actor>(m_device);
+	m_drakefirePistol = EU::MakeShared<Actor>(m_device);
+	m_sciFiToad = EU::MakeShared<Actor>(m_device);
+	if (m_cyberGun.isNull() || m_drakefirePistol.isNull() || m_sciFiToad.isNull()) {
+		ERROR("Main", "InitDevice", "Failed to create built-in demo actors.");
+		return E_OUTOFMEMORY;
 	}
 
-	m_toadRenderMesh.destroy();
-	for (const MeshComponent& meshComponent : m_toadModel->GetMeshes()) {
-		Submesh submesh{};
-		hr = submesh.vertexBuffer.init(m_device, meshComponent, D3D11_BIND_VERTEX_BUFFER);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad vertex buffer. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
+	m_cyberGun->setName("Demo Cube");
+	m_drakefirePistol->setName("Demo Pyramid");
+	m_sciFiToad->setName("Demo Floor");
 
-		hr = submesh.indexBuffer.init(m_device, meshComponent, D3D11_BIND_INDEX_BUFFER);
-		if (FAILED(hr)) {
-			ERROR("Main", "InitDevice",
-				("Failed to initialize Sci-Fi Toad index buffer. HRESULT: " + std::to_string(hr)).c_str());
-			return hr;
-		}
+	m_cyberGun->getComponent<Transform>()->setTransform(
+		EU::Vector3(-2.2f, 1.0f, 4.0f), EU::Vector3(0.0f, 0.35f, 0.0f), EU::Vector3(1.0f, 1.0f, 1.0f));
+	m_drakefirePistol->getComponent<Transform>()->setTransform(
+		EU::Vector3(2.2f, 0.0f, 4.8f), EU::Vector3(0.0f, -0.35f, 0.0f), EU::Vector3(1.0f, 1.0f, 1.0f));
+	m_sciFiToad->getComponent<Transform>()->setTransform(
+		EU::Vector3(0.0f, 0.0f, 4.0f), EU::Vector3(0.0f, 0.0f, 0.0f), EU::Vector3(1.0f, 1.0f, 1.0f));
 
-		submesh.indexCount = meshComponent.m_numIndex;
-		submesh.localTransform = meshComponent.m_localTransform;
-		const std::string& meshName = meshComponent.m_name;
-		if (meshName.find("Eyes") != std::string::npos ||
-			(meshName.find("Head_low") != std::string::npos &&
-				meshName.find("GlassHead") == std::string::npos)) {
-			submesh.materialSlot = 2;
-		}
-		else if (meshName.find("Glass") != std::string::npos) {
-			submesh.materialSlot = 1;
-		}
-		else if (meshName.find("Head") != std::string::npos) {
-			submesh.materialSlot = 2;
-		}
-		else {
-			submesh.materialSlot = 0;
-		}
-		m_toadRenderMesh.getSubmeshes().push_back(std::move(submesh));
+	const MeshComponent cubeMesh = makeDemoCube();
+	const MeshComponent pyramidMesh = makeDemoPyramid();
+	const MeshComponent floorMesh = makeDemoFloor();
+	if (FAILED(uploadBuiltinMesh(m_device, cubeMesh, m_cyberGunRenderMesh)) ||
+		FAILED(uploadBuiltinMesh(m_device, pyramidMesh, m_drakefireRenderMesh)) ||
+		FAILED(uploadBuiltinMesh(m_device, floorMesh, m_toadRenderMesh))) {
+		ERROR("Main", "InitDevice", "Failed to upload built-in demo geometry to the GPU.");
+		return E_FAIL;
 	}
 
-	EU::TSharedPointer<MeshRendererComponent> meshRenderer = m_cyberGun->getComponent<MeshRendererComponent>();
-	if (!meshRenderer) {
-		meshRenderer = EU::MakeShared<MeshRendererComponent>();
-		m_cyberGun->addComponent(meshRenderer);
+	if (!attachRenderer(m_cyberGun, m_cyberGunRenderMesh, m_cyberGunMaterial, true) ||
+		!attachRenderer(m_drakefirePistol, m_drakefireRenderMesh, m_drakefireMaterial, true) ||
+		!attachRenderer(m_sciFiToad, m_toadRenderMesh, m_toadMaterial, false)) {
+		ERROR("Main", "InitDevice", "Failed to attach renderers to built-in demo actors.");
+		return E_FAIL;
 	}
-	meshRenderer->setMesh(&m_cyberGunRenderMesh);
-	meshRenderer->setMaterialInstance(&m_cyberGunMaterial);
-	meshRenderer->setVisible(true);
-	meshRenderer->setCastShadow(true);
 
-	EU::TSharedPointer<MeshRendererComponent> drakefireMeshRenderer = m_drakefirePistol->getComponent<MeshRendererComponent>();
-	if (!drakefireMeshRenderer) {
-		drakefireMeshRenderer = EU::MakeShared<MeshRendererComponent>();
-		m_drakefirePistol->addComponent(drakefireMeshRenderer);
+	m_actors.push_back(m_cyberGun);
+	m_actors.push_back(m_drakefirePistol);
+	m_actors.push_back(m_sciFiToad);
+	for (auto& actor : m_actors) {
+		m_sceneGraph.addEntity(actor.get());
 	}
-	drakefireMeshRenderer->setMesh(&m_drakefireRenderMesh);
-	drakefireMeshRenderer->setMaterialInstance(&m_drakefireMaterial);
-	drakefireMeshRenderer->setVisible(true);
-	drakefireMeshRenderer->setCastShadow(true);
 
-	EU::TSharedPointer<MeshRendererComponent> toadMeshRenderer = m_sciFiToad->getComponent<MeshRendererComponent>();
-	if (!toadMeshRenderer) {
-		toadMeshRenderer = EU::MakeShared<MeshRendererComponent>();
-		m_sciFiToad->addComponent(toadMeshRenderer);
-	}
-	toadMeshRenderer->setMesh(&m_toadRenderMesh);
-	toadMeshRenderer->setMaterialInstances({ &m_toadMaterial, &m_toadGlassMaterial, &m_toadHeadMaterial });
-	toadMeshRenderer->setVisible(true);
-	toadMeshRenderer->setCastShadow(true);
+	// Registra el tipo de geometria procedural para poder reconstruirla al abrir
+	// una escena desde cero (no depende de archivos OBJ externos).
+	registerBuiltinActorMetadata(m_cyberGun, BuiltinMeshKind::Cube);
+	registerBuiltinActorMetadata(m_drakefirePistol, BuiltinMeshKind::Pyramid);
+	registerBuiltinActorMetadata(m_sciFiToad, BuiltinMeshKind::Floor);
+
+	MESSAGE("Main", "InitDevice", "Built-in demo scene created: cube, pyramid and floor.");
 
 	m_directionalLightActor = EU::MakeShared<Actor>(m_device);
 	if (!m_directionalLightActor.isNull()) {
@@ -656,7 +1283,17 @@ BaseApp::init() {
 		m_sceneGraph.addEntity(m_directionalLightActor.get());
 	}
 
-	loadScene(getDefaultScenePath());
+	m_currentScenePath = getDefaultScenePath();
+	if (isValidSceneFileHeader(m_currentScenePath)) {
+		// V13 scenes are self-contained enough to rebuild actors from a clean
+		// runtime list. Clearing first prevents stale components when actors were
+		// deleted/reordered between sessions.
+		clearCurrentSceneActors();
+		if (!loadScene(m_currentScenePath)) {
+			ERROR("Main", "InitDevice", "Default scene exists but could not be loaded. Starting a fresh scene.");
+			createNewScene();
+		}
+	}
 
 	hr = m_editorViewportPass.init(m_device, 1280, 720);
 	if (FAILED(hr)) {
@@ -672,11 +1309,35 @@ BaseApp::init() {
 		return hr;
 	}
 
+	// Construye el catalogo inicial despues de que el dispositivo y el renderer
+	// estan disponibles. Las miniaturas son recursos D3D11 administrados por BaseApp.
+	refreshAssetBrowserCatalog(true);
+
+	m_d3dReady = true;
 	return S_OK;
 }
 
 void
 BaseApp::update(float deltaTime) {
+	// Apply a pending editor viewport resize BEFORE starting the new ImGui frame.
+	// ImGui stores the viewport/GBuffer SRVs inside its draw commands until
+	// GUI::render(). Releasing those SRVs after drawViewportPanel() but before
+	// ImGui_ImplDX11_RenderDrawData() leaves dangling texture pointers and can
+	// make the D3D11 backend break inside DrawIndexed.
+	handleEditorViewportResize();
+	// Scene/actor operations are deferred for the same reason as viewport/texture
+	// changes: deleting or rebuilding actors while ImGui still references them
+	// during the previous frame can leave dangling pointers.
+	handlePendingSceneEditorAction();
+	// Asset Browser actions are also deferred until the previous ImGui frame is
+	// fully rendered. This is especially important when applying a texture that
+	// may replace an SRV shown by the editor.
+	handlePendingAssetBrowserAction();
+	// Texture replacement requests are executed before the new ImGui frame.
+	// This keeps the previous frame's SRV pointers alive until ImGui is done with them.
+	handlePendingMaterialTextureEdit();
+	updateAssetBrowserCatalog(deltaTime);
+
 	// Update our time
 	static float t = 0.0f;
 	if (m_swapChain.m_driverType == D3D_DRIVER_TYPE_REFERENCE)
@@ -700,6 +1361,9 @@ BaseApp::update(float deltaTime) {
 			m_gui.selectedActorIndex = static_cast<int>(m_actors.size()) - 1;
 		}
 	}
+	if (m_gui.consumeImportMeshRequest()) {
+		importOBJFromDialog();
+	}
 	EU::TSharedPointer<Actor> selectedActor;
 	if (m_gui.selectedActorIndex >= 0 &&
 		m_gui.selectedActorIndex < static_cast<int>(m_actors.size())) {
@@ -722,8 +1386,15 @@ BaseApp::update(float deltaTime) {
 		selectedActor = m_actors[m_gui.selectedActorIndex];
 	}
 	m_gui.inspectorGeneral(selectedActor);
+	m_gui.drawMaterialEditor(selectedActor);
+	m_gui.drawAssetBrowser(m_assetBrowserItems, selectedActor);
 	if (m_gui.consumeSaveSceneRequest()) {
-		saveScene(getDefaultScenePath());
+		if (m_currentScenePath.empty()) {
+			saveSceneAsFromDialog();
+		}
+		else {
+			saveScene(m_currentScenePath);
+		}
 	}
 
 	unsigned int desiredW = static_cast<unsigned int>(m_gui.m_viewportSize.x);
@@ -765,8 +1436,10 @@ BaseApp::update(float deltaTime) {
 	XMStoreFloat4x4(&m_constantBufferStruct.Projection, XMMatrixTranspose(m_camera.getProj()));
 	m_constantBufferStruct.CameraPos = m_camera.getPosition();
 
-	// Update Skybox Pass -> Solo necesita la vista sin traslacion + proyeccion para funcionar correctamente (ver metodo update de Skybox)
-	m_skybox.update(m_deviceContext, m_camera);
+	// Update Skybox Pass solo si el recurso se inicializo correctamente.
+	if (m_skyboxReady) {
+		m_skybox.update(m_deviceContext, m_camera);
+	}
 
 	// Update Actors
 	m_sceneGraph.update(deltaTime, m_deviceContext);
@@ -775,13 +1448,18 @@ BaseApp::update(float deltaTime) {
 
 void
 BaseApp::render() {
-	handleEditorViewportResize();
+	if (!m_d3dReady || !m_deviceContext.m_deviceContext || !m_swapChain.m_swapChain) {
+		return;
+	}
 
+	// Do NOT resize editor render targets here. By this point update() has
+	// already built ImGui draw commands containing SRV pointers for this frame.
+	// Resizing here would invalidate those pointers before GUI::render().
 	float ClearColor[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
 
 	m_renderScene.clear();
 	m_sceneGraph.gatherRenderScene(m_renderScene, m_camera);
-	m_renderScene.skybox = &m_skybox;
+	m_renderScene.skybox = m_skyboxReady ? &m_skybox : nullptr;
 	m_renderPipeline.render(
 		m_deviceContext,
 		m_camera,
@@ -802,13 +1480,51 @@ BaseApp::render() {
 
 void
 BaseApp::destroy() {
-	if (m_deviceContext.m_deviceContext) m_deviceContext.m_deviceContext->ClearState();
+	m_d3dReady = false;
+	if (m_deviceContext.m_deviceContext) {
+		m_deviceContext.m_deviceContext->ClearState();
+	}
+
+	// Shut ImGui down before releasing the D3D resources its backend depends on.
+	if (m_guiInitialized) {
+		m_gui.destroy();
+		m_guiInitialized = false;
+	}
+
+	// Release editor-created texture overrides and Asset Browser previews while
+	// the D3D device is still alive.
+	m_materialTextureOverrides.clear();
+	m_assetBrowserItems.clear();
+	m_assetBrowserPreviewTextures.clear();
+	m_assetBrowserFingerprint = 0;
+
+	// Release scene-owned actors while the D3D device is still alive.
+	m_renderScene.clear();
 	m_sceneGraph.destroy();
+	m_cyberGun.reset();
+	m_drakefirePistol.reset();
+	m_sciFiToad.reset();
+	m_directionalLightActor.reset();
+	m_actors.clear();
+
+	for (auto& importedAsset : m_importedMeshAssets) {
+		if (!importedAsset) continue;
+		importedAsset->actor.reset();
+		if (importedAsset->renderMesh) {
+			importedAsset->renderMesh->destroy();
+		}
+	}
+	m_importedMeshAssets.clear();
+
 	m_editorViewportPass.destroy();
 	m_renderPipeline.destroy();
+	m_skybox.destroy();
+	m_skyboxReady = false;
 	m_cyberGunRenderMesh.destroy();
 	m_drakefireRenderMesh.destroy();
 	m_toadRenderMesh.destroy();
+	m_constantBuffer.destroy();
+
 	m_AlbedoSRV.destroy();
 	m_MetallicSRV.destroy();
 	m_NormalSRV.destroy();
@@ -832,34 +1548,34 @@ BaseApp::destroy() {
 	m_toadHeadNormalSRV.destroy();
 	m_toadHeadRoughnessSRV.destroy();
 	m_lightIconTexture.destroy();
+	m_skyboxTex.destroy();
+
 	m_defaultRasterizer.destroy();
 	m_defaultDepthStencil.destroy();
 	m_defaultSampler.destroy();
-	//m_cbNeverChanges.destroy();
-	//m_cbChangeOnResize.destroy();
 	m_shaderProgram.destroy();
-	m_depthStencil.destroy();
 	m_depthStencilView.destroy();
+	m_depthStencil.destroy();
 	m_renderTargetView.destroy();
-	m_swapChain.destroy();
 	m_backBuffer.destroy();
-	if (m_guiInitialized) {
-		m_gui.destroy();
-		m_guiInitialized = false;
-	}
+	m_swapChain.destroy();
+
 	delete m_model;
 	m_model = nullptr;
 	delete m_drakefireModel;
 	m_drakefireModel = nullptr;
 	delete m_toadModel;
 	m_toadModel = nullptr;
+
 	m_deviceContext.destroy();
 	m_device.destroy();
 }
 
 LRESULT
 BaseApp::WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
-	if (ImGui_ImplWin32_WndProcHandler(hWnd, message, wParam, lParam)) {
+	BaseApp* app = reinterpret_cast<BaseApp*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+	if (app && app->m_guiInitialized &&
+		ImGui_ImplWin32_WndProcHandler(hWnd, message, wParam, lParam)) {
 		return true;
 	}
 
@@ -884,8 +1600,6 @@ BaseApp::WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
 		unsigned int newH = HIWORD(lParam);
 		if (newW == 0 || newH == 0) return 0;
 
-		// Recupera tu instancia BaseApp (lo mas comun es guardarla en GWLP_USERDATA en WM_CREATE)
-		BaseApp* app = reinterpret_cast<BaseApp*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
 		if (app) app->onResize(newW, newH);
 		return 0;
 	}
@@ -898,53 +1612,110 @@ BaseApp::WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
 
 void BaseApp::onResize(unsigned int newW, unsigned int newH)
 {
-	// 1) Actualiza window size (tu init lo calcula con GetClientRect solo una vez) :contentReference[oaicite:6]{index=6}
-	if (!m_d3dReady) {
-		// Aun asi puedes actualizar el tamano logico de la ventana
-		m_window.m_width = (int)newW;
-		m_window.m_height = (int)newH;
+	if (newW == 0 || newH == 0) {
 		return;
 	}
 
-	if (!m_deviceContext.m_deviceContext || !m_swapChain.m_swapChain) return;
-	if (newW == 0 || newH == 0) return;
+	// Keep the logical Win32 client size even if D3D is not ready yet.
+	m_window.m_width = newW;
+	m_window.m_height = newH;
+	if (!m_device.m_device || !m_deviceContext.m_deviceContext || !m_swapChain.m_swapChain) {
+		return;
+	}
 
-	m_window.m_width = (int)newW;
-	m_window.m_height = (int)newH;
-	// 2) Desbindea targets actuales (clave antes de destruir)
-	ID3D11RenderTargetView* nullRTV = nullptr;
-	m_deviceContext.m_deviceContext->OMSetRenderTargets(1, &nullRTV, nullptr);
-
-	// 3) Libera recursos dependientes del tamano (RTV/DSV/Depth/BackBuffer)
+	// ResizeBuffers requires every reference to the old back buffer to be released
+	// and unbound. The depth buffer does not reference it, so keep the previous
+	// depth resources alive until the replacement set is completely valid.
+	m_deviceContext.m_deviceContext->OMSetRenderTargets(0, nullptr, nullptr);
 	m_renderTargetView.destroy();
-	m_depthStencilView.destroy();
-	m_depthStencil.destroy();
 	m_backBuffer.destroy();
 
-	// 4) Resize swapchain
 	HRESULT hr = m_swapChain.resizeBuffers(newW, newH);
-	if (FAILED(hr)) return;
+	if (FAILED(hr)) {
+		ERROR("Main", "onResize", "IDXGISwapChain::ResizeBuffers failed; restoring the current back buffer.");
 
-	// 5) Re-obten backbuffer
-	hr = m_swapChain.getBackBuffer(m_backBuffer);
-	if (FAILED(hr)) return;
+		// ResizeBuffers leaves the previous swap-chain buffers intact on failure.
+		// Reacquire that buffer so the engine can keep presenting instead of
+		// remaining permanently without an RTV.
+		Texture restoredBackBuffer;
+		RenderTargetView restoredRTV;
+		if (SUCCEEDED(m_swapChain.getBackBuffer(restoredBackBuffer)) &&
+			SUCCEEDED(restoredRTV.init(m_device, restoredBackBuffer, DXGI_FORMAT_R8G8B8A8_UNORM))) {
+			m_backBuffer = std::move(restoredBackBuffer);
+			m_renderTargetView = std::move(restoredRTV);
+			m_d3dReady = true;
+		}
+		else {
+			m_d3dReady = false;
+		}
+		return;
+	}
 
-	// 6) Re-crea RTV
-	hr = m_renderTargetView.init(m_device, m_backBuffer, DXGI_FORMAT_R8G8B8A8_UNORM);
-	if (FAILED(hr)) return;
+	Texture newBackBuffer;
+	RenderTargetView newRTV;
+	Texture newDepthStencil;
+	DepthStencilView newDSV;
 
-	// 7) Re-crea Depth/DSV (tu init actual lo hace con m_window.m_width/m_height)
-	hr = m_depthStencil.init(m_device, newW, newH, DXGI_FORMAT_D24_UNORM_S8_UINT, D3D11_BIND_DEPTH_STENCIL, 4, 0);
-	if (FAILED(hr)) return;
+	hr = m_swapChain.getBackBuffer(newBackBuffer);
+	if (FAILED(hr) || !newBackBuffer.m_texture) {
+		ERROR("Main", "onResize", "Failed to acquire the resized back buffer.");
+		m_d3dReady = false;
+		return;
+	}
 
-	hr = m_depthStencilView.init(m_device, m_depthStencil, DXGI_FORMAT_D24_UNORM_S8_UINT);
-	if (FAILED(hr)) return;
+	D3D11_TEXTURE2D_DESC resizedBackBufferDesc{};
+	newBackBuffer.m_texture->GetDesc(&resizedBackBufferDesc);
+	if (resizedBackBufferDesc.Width == 0 || resizedBackBufferDesc.Height == 0) {
+		ERROR("Main", "onResize", "Resized back buffer returned invalid dimensions.");
+		m_d3dReady = false;
+		return;
+	}
 
-	// 8) Viewport
-	m_viewport.init(m_window);
+	hr = newRTV.init(m_device, newBackBuffer, DXGI_FORMAT_R8G8B8A8_UNORM);
+	if (FAILED(hr)) {
+		ERROR("Main", "onResize", "Failed to recreate the main render-target view.");
+		m_d3dReady = false;
+		return;
+	}
 
-	// 9) Camara (aspect ratio) (tu camara lo calcula a partir de m_window) 
-	m_camera.setLens(XM_PIDIV4, newW / (float)newH, 0.01f, 100.0f);
+	hr = newDepthStencil.init(m_device,
+		resizedBackBufferDesc.Width,
+		resizedBackBufferDesc.Height,
+		DXGI_FORMAT_D24_UNORM_S8_UINT,
+		D3D11_BIND_DEPTH_STENCIL,
+		resizedBackBufferDesc.SampleDesc.Count,
+		resizedBackBufferDesc.SampleDesc.Quality);
+	if (FAILED(hr)) {
+		ERROR("Main", "onResize", "Failed to recreate the main depth-stencil texture.");
+		m_d3dReady = false;
+		return;
+	}
+
+	hr = newDSV.init(m_device, newDepthStencil, DXGI_FORMAT_D24_UNORM_S8_UINT);
+	if (FAILED(hr)) {
+		ERROR("Main", "onResize", "Failed to recreate the main depth-stencil view.");
+		m_d3dReady = false;
+		return;
+	}
+
+	// Commit only after every size-dependent D3D resource is valid.
+	m_backBuffer = std::move(newBackBuffer);
+	m_renderTargetView = std::move(newRTV);
+	m_depthStencil = std::move(newDepthStencil);
+	m_depthStencilView = std::move(newDSV);
+
+	hr = m_viewport.init(resizedBackBufferDesc.Width, resizedBackBufferDesc.Height);
+	if (FAILED(hr)) {
+		ERROR("Main", "onResize", "Failed to update the main viewport.");
+		m_d3dReady = false;
+		return;
+	}
+
+	m_camera.setLens(XM_PIDIV4,
+		resizedBackBufferDesc.Width / static_cast<float>(resizedBackBufferDesc.Height),
+		0.01f,
+		100.0f);
+	m_d3dReady = true;
 }
 
 void BaseApp::handleEditorViewportResize()
@@ -972,10 +1743,17 @@ void BaseApp::handleEditorViewportResize()
 		return;
 	}
 
-	// Intercambio seguro: el pass viejo queda en newPass y se destruye al salir
-	m_editorViewportPass.swap(newPass);
-	m_renderPipeline.resize(m_device, m_pendingViewportWidth, m_pendingViewportHeight);
+	// Resize the active renderer first. If it fails, keep the currently valid
+	// viewport and renderer resources at their previous matching dimensions.
+	hr = m_renderPipeline.resize(m_device, m_pendingViewportWidth, m_pendingViewportHeight);
+	if (FAILED(hr)) {
+		ERROR("Main", "handleEditorViewportResize", "Failed to resize the active renderer.");
+		m_editorViewportResizePending = false;
+		return;
+	}
 
+	// Intercambio seguro: el pass viejo queda en newPass y se destruye al salir.
+	m_editorViewportPass.swap(newPass);
 	m_editorViewportResizePending = false;
 }
 
@@ -983,6 +1761,608 @@ std::string BaseApp::getDefaultScenePath() const
 {
 	CreateDirectoryA("Saved", nullptr);
 	return "Saved/DefaultScene.wvscene";
+}
+
+
+bool BaseApp::refreshAssetBrowserCatalog(bool force)
+{
+	namespace fs = std::filesystem;
+	const fs::path projectRoot = findProjectRoot();
+	if (projectRoot.empty()) return false;
+
+	const fs::path assetsRoot = projectRoot / "Assets";
+	std::error_code ec;
+	fs::create_directories(assetsRoot / "Models", ec);
+	ec.clear();
+	fs::create_directories(assetsRoot / "Textures", ec);
+
+	struct PendingAsset {
+		fs::path path;
+		AssetBrowserItemType type = AssetBrowserItemType::Texture;
+	};
+	std::vector<PendingAsset> discovered;
+
+	ec.clear();
+	if (fs::exists(assetsRoot, ec) && !ec) {
+		fs::recursive_directory_iterator iterator(
+			assetsRoot,
+			fs::directory_options::skip_permission_denied,
+			ec);
+		const fs::recursive_directory_iterator end;
+		for (; !ec && iterator != end; iterator.increment(ec)) {
+			if (ec) break;
+			if (!iterator->is_regular_file(ec) || ec) {
+				ec.clear();
+				continue;
+			}
+
+			const fs::path filePath = iterator->path();
+			const std::string extension = lowerAscii(filePath.extension().string());
+			if (extension == ".obj") {
+				discovered.push_back({ filePath, AssetBrowserItemType::ModelOBJ });
+			}
+			else if (extension == ".mtl") {
+				discovered.push_back({ filePath, AssetBrowserItemType::MaterialMTL });
+			}
+			else if (isSupportedMaterialTextureFile(filePath)) {
+				discovered.push_back({ filePath, AssetBrowserItemType::Texture });
+			}
+		}
+	}
+
+	std::sort(discovered.begin(), discovered.end(),
+		[](const PendingAsset& a, const PendingAsset& b) {
+			const int typeA = static_cast<int>(a.type);
+			const int typeB = static_cast<int>(b.type);
+			if (typeA != typeB) return typeA < typeB;
+			return lowerAscii(a.path.generic_string()) < lowerAscii(b.path.generic_string());
+		});
+
+	// Fingerprint basado en ruta, tamano y fecha de modificacion. El catalogo solo
+	// se reconstruye cuando algo dentro de Assets realmente cambia.
+	unsigned long long fingerprint = 1469598103934665603ull;
+	auto mixValue = [&fingerprint](unsigned long long value) {
+		fingerprint ^= value;
+		fingerprint *= 1099511628211ull;
+	};
+	std::hash<std::string> stringHasher;
+	for (const PendingAsset& asset : discovered) {
+		mixValue(static_cast<unsigned long long>(stringHasher(lowerAscii(asset.path.generic_string()))));
+		ec.clear();
+		const auto size = fs::file_size(asset.path, ec);
+		if (!ec) mixValue(static_cast<unsigned long long>(size));
+		ec.clear();
+		const auto writeTime = fs::last_write_time(asset.path, ec);
+		if (!ec) {
+			mixValue(static_cast<unsigned long long>(writeTime.time_since_epoch().count()));
+		}
+	}
+
+	if (!force && fingerprint == m_assetBrowserFingerprint) {
+		return false;
+	}
+
+	std::vector<AssetBrowserItem> newItems;
+	std::vector<std::unique_ptr<Texture>> newPreviewTextures;
+	newItems.reserve(discovered.size());
+	newPreviewTextures.reserve(std::min<size_t>(discovered.size(), 128));
+
+	constexpr size_t kMaxPreviewTextures = 128;
+	constexpr uintmax_t kMaxPreviewFileBytes = 64ull * 1024ull * 1024ull;
+	size_t loadedPreviewCount = 0;
+
+	for (const PendingAsset& discoveredAsset : discovered) {
+		AssetBrowserItem item;
+		item.type = discoveredAsset.type;
+		item.name = discoveredAsset.path.filename().string();
+		item.relativePath = makePortableAssetPath(discoveredAsset.path);
+
+		if (item.type == AssetBrowserItemType::Texture &&
+			loadedPreviewCount < kMaxPreviewTextures) {
+			ec.clear();
+			const uintmax_t fileBytes = fs::file_size(discoveredAsset.path, ec);
+			const std::string extension = lowerAscii(discoveredAsset.path.extension().string());
+			// DDS puede requerir el loader legacy. Si no esta disponible, el asset
+			// sigue apareciendo en el browser pero sin miniatura.
+			if (!ec && fileBytes <= kMaxPreviewFileBytes && extension != ".dds") {
+				auto preview = std::make_unique<Texture>();
+				if (preview &&
+					SUCCEEDED(preview->init(m_device, discoveredAsset.path.string(), PNG)) &&
+					preview->m_textureFromImg) {
+					item.previewSRV = preview->m_textureFromImg;
+					newPreviewTextures.push_back(std::move(preview));
+					++loadedPreviewCount;
+				}
+			}
+		}
+
+		newItems.push_back(std::move(item));
+	}
+
+	// Esta funcion se ejecuta antes de ImGui::NewFrame(), de forma que los SRV
+	// del catalogo anterior ya no estan referenciados por draw commands activos.
+	m_assetBrowserItems = std::move(newItems);
+	m_assetBrowserPreviewTextures = std::move(newPreviewTextures);
+	m_assetBrowserFingerprint = fingerprint;
+
+	MESSAGE("Main", "AssetBrowser", L"Asset catalog refreshed. Items: " << m_assetBrowserItems.size());
+	return true;
+}
+
+void BaseApp::updateAssetBrowserCatalog(float deltaTime)
+{
+	if (!std::isfinite(deltaTime) || deltaTime < 0.0f) deltaTime = 0.0f;
+	m_assetBrowserRefreshTimer += deltaTime;
+	if (m_assetBrowserRefreshTimer < 1.0f) return;
+	m_assetBrowserRefreshTimer = 0.0f;
+	refreshAssetBrowserCatalog(false);
+}
+
+void BaseApp::handlePendingAssetBrowserAction()
+{
+	AssetBrowserRequest request{};
+	if (!m_gui.consumeAssetBrowserRequest(request)) return;
+
+	switch (request.action) {
+	case AssetBrowserAction::ImportOBJ:
+		if (!request.path.empty()) {
+			importOBJModel(request.path);
+		}
+		break;
+
+	case AssetBrowserAction::ApplyTexture:
+	{
+		const int actorIndex = m_gui.selectedActorIndex;
+		if (actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) break;
+		const EU::TSharedPointer<Actor> actor = m_actors[actorIndex];
+		if (actor.isNull() || request.path.empty()) break;
+		if (!applyMaterialTextureOverride(actor, request.materialSlot, request.channel, request.path)) {
+			ERROR("Main", "AssetBrowser", "Could not apply the selected texture to the selected material.");
+		}
+		break;
+	}
+
+	case AssetBrowserAction::Refresh:
+		refreshAssetBrowserCatalog(true);
+		break;
+
+	case AssetBrowserAction::OpenAssetsFolder:
+	{
+		const std::filesystem::path assetsRoot = findProjectRoot() / "Assets";
+		std::error_code ec;
+		std::filesystem::create_directories(assetsRoot, ec);
+		const HINSTANCE result = ShellExecuteA(
+			m_window.m_hWnd,
+			"open",
+			assetsRoot.string().c_str(),
+			nullptr,
+			nullptr,
+			SW_SHOWNORMAL);
+		if (reinterpret_cast<INT_PTR>(result) <= 32) {
+			ERROR("Main", "AssetBrowser", "Windows could not open the Assets folder.");
+		}
+		break;
+	}
+
+	default:
+		break;
+	}
+}
+
+bool BaseApp::importOBJFromDialog()
+{
+	char fileName[32768] = {};
+	OPENFILENAMEA dialog{};
+	dialog.lStructSize = sizeof(dialog);
+	dialog.hwndOwner = m_window.m_hWnd;
+	dialog.lpstrFilter = "Wavefront OBJ (*.obj)\0*.obj\0All files (*.*)\0*.*\0\0";
+	dialog.lpstrFile = fileName;
+	dialog.nMaxFile = static_cast<DWORD>(sizeof(fileName));
+	dialog.lpstrTitle = "Import OBJ Mesh";
+	dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+	dialog.lpstrDefExt = "obj";
+
+	if (!GetOpenFileNameA(&dialog)) {
+		const DWORD errorCode = CommDlgExtendedError();
+		if (errorCode != 0) {
+			ERROR("Main", "importOBJFromDialog", ("Windows file dialog failed. Code: " + std::to_string(errorCode)).c_str());
+		}
+		return false;
+	}
+
+	return importOBJModel(fileName);
+}
+
+
+BaseApp::MaterialTextureOverride* BaseApp::findMaterialTextureOverride(const Actor* actor,
+	size_t materialSlot,
+	MaterialTextureChannel channel)
+{
+	if (!actor) return nullptr;
+	for (auto& textureOverride : m_materialTextureOverrides) {
+		if (textureOverride.actor == actor &&
+			textureOverride.materialSlot == materialSlot &&
+			textureOverride.channel == channel) {
+			return &textureOverride;
+		}
+	}
+	return nullptr;
+}
+
+const BaseApp::MaterialTextureOverride* BaseApp::findMaterialTextureOverride(const Actor* actor,
+	size_t materialSlot,
+	MaterialTextureChannel channel) const
+{
+	if (!actor) return nullptr;
+	for (const auto& textureOverride : m_materialTextureOverrides) {
+		if (textureOverride.actor == actor &&
+			textureOverride.materialSlot == materialSlot &&
+			textureOverride.channel == channel) {
+			return &textureOverride;
+		}
+	}
+	return nullptr;
+}
+
+bool BaseApp::applyMaterialTextureOverride(const EU::TSharedPointer<Actor>& actor,
+	size_t materialSlot,
+	MaterialTextureChannel channel,
+	const std::string& path)
+{
+	if (actor.isNull() || path.empty()) return false;
+	auto meshRenderer = actor->getComponent<MeshRendererComponent>();
+	if (meshRenderer.isNull()) return false;
+	const std::vector<MaterialInstance*>& materials = meshRenderer->getMaterialInstances();
+	if (materialSlot >= materials.size() || !materials[materialSlot]) return false;
+
+	std::filesystem::path resolvedPath;
+	if (!resolveMaterialOverrideTexturePath(path, resolvedPath)) {
+		ERROR("Main", "MaterialEditor", ("Texture file could not be resolved: " + path).c_str());
+		return false;
+	}
+
+	auto texture = std::make_unique<Texture>();
+	const std::string extension = lowerAscii(resolvedPath.extension().string());
+	const ExtensionType extensionType = extension == ".dds" ? DDS : PNG;
+	const HRESULT hr = texture->init(m_device, resolvedPath.string(), extensionType);
+	if (FAILED(hr)) {
+		ERROR("Main", "MaterialEditor", ("Failed to load material texture: " + resolvedPath.string()).c_str());
+		return false;
+	}
+
+	MaterialInstance* materialInstance = materials[materialSlot];
+	MaterialTextureOverride* existing = findMaterialTextureOverride(actor.get(), materialSlot, channel);
+	if (existing) {
+		existing->texture = std::move(texture);
+		existing->sourcePath = makePortableAssetPath(resolvedPath);
+		setMaterialTextureForChannel(materialInstance, channel, existing->texture.get());
+	}
+	else {
+		MaterialTextureOverride textureOverride;
+		textureOverride.actor = actor.get();
+		textureOverride.materialSlot = materialSlot;
+		textureOverride.channel = channel;
+		textureOverride.originalTexture = getMaterialTextureForChannel(materialInstance, channel);
+		textureOverride.texture = std::move(texture);
+		textureOverride.sourcePath = makePortableAssetPath(resolvedPath);
+		setMaterialTextureForChannel(materialInstance, channel, textureOverride.texture.get());
+		m_materialTextureOverrides.push_back(std::move(textureOverride));
+	}
+
+	const std::wstring pathW(resolvedPath.wstring());
+	MESSAGE("Main", "MaterialEditor", L"Material texture applied: " << pathW);
+	return true;
+}
+
+bool BaseApp::clearMaterialTextureOverride(const EU::TSharedPointer<Actor>& actor,
+	size_t materialSlot,
+	MaterialTextureChannel channel)
+{
+	if (actor.isNull()) return false;
+	auto meshRenderer = actor->getComponent<MeshRendererComponent>();
+	if (meshRenderer.isNull()) return false;
+	const std::vector<MaterialInstance*>& materials = meshRenderer->getMaterialInstances();
+	if (materialSlot >= materials.size() || !materials[materialSlot]) return false;
+
+	for (auto it = m_materialTextureOverrides.begin(); it != m_materialTextureOverrides.end(); ++it) {
+		if (it->actor == actor.get() && it->materialSlot == materialSlot && it->channel == channel) {
+			setMaterialTextureForChannel(materials[materialSlot], channel, it->originalTexture);
+			m_materialTextureOverrides.erase(it);
+			MESSAGE("Main", "MaterialEditor", L"Material texture override reset to its imported/default texture.");
+			return true;
+		}
+	}
+	return false;
+}
+
+void BaseApp::handlePendingMaterialTextureEdit()
+{
+	MaterialTextureEditRequest request{};
+	if (!m_gui.consumeMaterialTextureEditRequest(request)) return;
+
+	const int actorIndex = m_gui.selectedActorIndex;
+	if (actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) return;
+	EU::TSharedPointer<Actor> actor = m_actors[actorIndex];
+	if (actor.isNull()) return;
+
+	if (request.clear) {
+		clearMaterialTextureOverride(actor, request.materialSlot, request.channel);
+		return;
+	}
+
+	char fileName[32768] = {};
+	OPENFILENAMEA dialog{};
+	dialog.lStructSize = sizeof(dialog);
+	dialog.hwndOwner = m_window.m_hWnd;
+	dialog.lpstrFilter =
+		"Image files (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds\0"
+		"PNG (*.png)\0*.png\0JPEG (*.jpg;*.jpeg)\0*.jpg;*.jpeg\0TGA (*.tga)\0*.tga\0BMP (*.bmp)\0*.bmp\0DDS (*.dds)\0*.dds\0\0";
+	dialog.lpstrFile = fileName;
+	dialog.nMaxFile = static_cast<DWORD>(sizeof(fileName));
+	dialog.lpstrTitle = "Select Material Texture";
+	dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+
+	if (!GetOpenFileNameA(&dialog)) {
+		const DWORD errorCode = CommDlgExtendedError();
+		if (errorCode != 0) {
+			ERROR("Main", "MaterialEditor", ("Windows texture file dialog failed. Code: " + std::to_string(errorCode)).c_str());
+		}
+		return;
+	}
+
+	const std::filesystem::path selectedPath(fileName);
+	std::filesystem::path projectTexturePath;
+	if (!copyMaterialTextureIntoProject(selectedPath, actorIndex, request.materialSlot, request.channel, projectTexturePath)) {
+		ERROR("Main", "MaterialEditor", "Could not copy the selected texture into Assets/Textures/MaterialOverrides.");
+		return;
+	}
+
+	applyMaterialTextureOverride(actor, request.materialSlot, request.channel, projectTexturePath.string());
+}
+
+const BaseApp::ImportedMeshAsset* BaseApp::findImportedMeshAsset(const Actor* actor) const
+{
+	if (!actor) return nullptr;
+	for (const auto& asset : m_importedMeshAssets) {
+		if (asset && !asset->actor.isNull() && asset->actor.get() == actor) {
+			return asset.get();
+		}
+	}
+	return nullptr;
+}
+
+bool BaseApp::attachOBJAssetToActor(const std::string& path, const EU::TSharedPointer<Actor>& actor, bool autoPlace)
+{
+	if (path.empty() || actor.isNull()) {
+		return false;
+	}
+
+	namespace fs = std::filesystem;
+	fs::path resolvedPath;
+	if (!resolveOBJAssetPath(path, actor->getName(), resolvedPath)) {
+		ERROR("Main", "attachOBJAssetToActor", ("Could not resolve OBJ asset: " + path).c_str());
+		return false;
+	}
+
+	const std::string portablePath = makePortableAssetPath(resolvedPath);
+	if (const ImportedMeshAsset* existingAsset = findImportedMeshAsset(actor.get())) {
+		if (existingAsset->builtinKind == BuiltinMeshKind::None &&
+			!existingAsset->sourcePath.empty() &&
+			lowerAscii(existingAsset->sourcePath) == lowerAscii(portablePath) &&
+			actor->getComponent<MeshRendererComponent>()) {
+			// Same live asset already attached.
+			return true;
+		}
+		// The actor is being repurposed (for example a built-in slot being loaded
+		// as an OBJ from a saved scene). Remove the previous ownership first.
+		removeActorOwnedResources(actor.get());
+	}
+
+	std::string actorName = actor->getName();
+	if (actorName.empty() || actorName == "Actor") {
+		actorName = resolvedPath.stem().string();
+		if (actorName.empty()) actorName = "Imported OBJ";
+		actor->setName(actorName);
+	}
+
+	auto importedAsset = std::make_unique<ImportedMeshAsset>();
+	importedAsset->model = std::make_unique<Model3D>(actorName, ModelType::OBJ);
+	if (!importedAsset->model || !importedAsset->model->load(resolvedPath.string())) {
+		ERROR("Main", "attachOBJAssetToActor", ("Failed to parse OBJ model: " + resolvedPath.string()).c_str());
+		return false;
+	}
+
+	importedAsset->renderMesh = std::make_unique<Mesh>();
+	if (!importedAsset->renderMesh) {
+		return false;
+	}
+
+	const std::vector<MeshComponent>& meshes = importedAsset->model->GetMeshes();
+	HRESULT hr = uploadImportedMeshes(m_device, meshes, *importedAsset->renderMesh);
+	if (FAILED(hr)) {
+		ERROR("Main", "attachOBJAssetToActor", "OBJ was parsed, but its GPU vertex/index buffers could not be created.");
+		return false;
+	}
+
+	const std::unordered_map<std::string, ObjMaterialInfo> mtlMaterials = loadOBJMaterialLibrary(resolvedPath);
+	std::unordered_map<std::string, Texture*> loadedTextureCache;
+	std::vector<MaterialInstance*> materialPointers;
+	materialPointers.reserve(meshes.size());
+	importedAsset->materials.reserve(meshes.size());
+
+	auto resolveAndLoadMap = [&](const std::string& mapPath, const ObjMaterialInfo& info) -> Texture* {
+		std::filesystem::path texturePath;
+		if (!resolveMaterialTexturePath(mapPath, info, resolvedPath, texturePath)) {
+			if (!mapPath.empty()) {
+				const std::wstring mapW(mapPath.begin(), mapPath.end());
+				MESSAGE("Main", "OBJMaterial", L"Texture referenced by MTL was not found; fallback will be used: " << mapW);
+			}
+			return nullptr;
+		}
+		return loadImportedTexture(m_device, texturePath, importedAsset->textures, loadedTextureCache);
+	};
+
+	for (const MeshComponent& sourceMesh : meshes) {
+		auto materialInstance = std::make_unique<MaterialInstance>();
+		if (!materialInstance) {
+			importedAsset->renderMesh->destroy();
+			return false;
+		}
+
+		const ObjMaterialInfo* info = nullptr;
+		auto materialIt = mtlMaterials.find(sourceMesh.m_materialName);
+		if (materialIt != mtlMaterials.end()) info = &materialIt->second;
+
+		const float alpha = info ? std::clamp(info->baseColor.w, 0.0f, 1.0f) : 1.0f;
+		auto materialResource = std::make_unique<Material>();
+		if (!materialResource) {
+			importedAsset->renderMesh->destroy();
+			return false;
+		}
+		materialResource->setShader(m_pbrMaterial.getShader());
+		materialResource->setRasterizerState(m_pbrMaterial.getRasterizerState());
+		materialResource->setDepthStencilState(m_pbrMaterial.getDepthStencilState());
+		materialResource->setSamplerState(m_pbrMaterial.getSamplerState());
+		materialResource->setDomain(alpha < 0.999f ? MaterialDomain::Transparent : MaterialDomain::Opaque);
+		materialResource->setBlendMode(alpha < 0.999f ? BlendMode::Alpha : BlendMode::Opaque);
+		materialInstance->setMaterial(materialResource.get());
+		materialInstance->setAlbedo(&m_AlbedoSRV);
+		materialInstance->setNormal(&m_NormalSRV);
+		// White scalar texture keeps the numeric factor in MaterialParams intact.
+		materialInstance->setMetallic(&m_AOSRV);
+		materialInstance->setRoughness(&m_AOSRV);
+		materialInstance->setAO(&m_AOSRV);
+		materialInstance->setEmissive(&m_EmissiveSRV);
+
+		MaterialParams& params = materialInstance->getParams();
+		params.baseColor = info ? info->baseColor : XMFLOAT4(0.72f, 0.78f, 0.88f, 1.0f);
+		params.metallic = info ? info->metallic : 0.0f;
+		params.roughness = info ? info->roughness : 0.55f;
+		params.ao = info ? info->ao : 1.0f;
+		params.normalScale = info ? info->normalScale : 1.0f;
+		params.emissiveStrength = 0.0f;
+		params.alphaCutoff = alpha < 0.999f ? 0.0f : 0.5f;
+
+		if (info) {
+			if (Texture* texture = resolveAndLoadMap(info->albedoMap, *info)) materialInstance->setAlbedo(texture);
+			if (Texture* texture = resolveAndLoadMap(info->normalMap, *info)) materialInstance->setNormal(texture);
+			if (Texture* texture = resolveAndLoadMap(info->metallicMap, *info)) {
+				materialInstance->setMetallic(texture);
+				if (!info->hasMetallicValue) params.metallic = 1.0f;
+			}
+			if (Texture* texture = resolveAndLoadMap(info->roughnessMap, *info)) {
+				materialInstance->setRoughness(texture);
+				if (!info->hasRoughnessValue) params.roughness = 1.0f;
+			}
+			if (Texture* texture = resolveAndLoadMap(info->aoMap, *info)) materialInstance->setAO(texture);
+			if (Texture* texture = resolveAndLoadMap(info->emissiveMap, *info)) {
+				materialInstance->setEmissive(texture);
+				params.emissiveStrength = (std::max)(1.0f,
+					(std::max)(info->emissiveColor.x, (std::max)(info->emissiveColor.y, info->emissiveColor.z)));
+			}
+			else {
+				const float emissiveMax = (std::max)(info->emissiveColor.x,
+					(std::max)(info->emissiveColor.y, info->emissiveColor.z));
+				if (emissiveMax > 0.0001f) {
+					auto emissiveTexture = std::make_unique<Texture>();
+					const auto toByte = [](float value) -> unsigned char {
+						return static_cast<unsigned char>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+					};
+					if (SUCCEEDED(emissiveTexture->initSolidColor(m_device,
+						toByte(info->emissiveColor.x),
+						toByte(info->emissiveColor.y),
+						toByte(info->emissiveColor.z), 255))) {
+						materialInstance->setEmissive(emissiveTexture.get());
+						params.emissiveStrength = 1.0f;
+						importedAsset->textures.push_back(std::move(emissiveTexture));
+					}
+				}
+			}
+		}
+
+		materialPointers.push_back(materialInstance.get());
+		importedAsset->materialResources.push_back(std::move(materialResource));
+		importedAsset->materials.push_back(std::move(materialInstance));
+	}
+
+	if (!attachRenderer(actor, *importedAsset->renderMesh, materialPointers, true)) {
+		importedAsset->renderMesh->destroy();
+		return false;
+	}
+
+	if (autoPlace) {
+		EU::Vector3 spawnPosition(0.0f, 0.0f, 4.0f);
+		EU::Vector3 spawnScale(1.0f, 1.0f, 1.0f);
+		computeImportedPlacement(meshes, spawnPosition, spawnScale);
+		EU::TSharedPointer<Transform> transform = actor->getComponent<Transform>();
+		if (transform) {
+			transform->setTransform(spawnPosition, EU::Vector3(0.0f, 0.0f, 0.0f), spawnScale);
+		}
+	}
+
+	importedAsset->actor = actor;
+	importedAsset->sourcePath = portablePath;
+	m_importedMeshAssets.push_back(std::move(importedAsset));
+	return true;
+}
+
+bool BaseApp::tryRestoreLegacyOBJActor(const EU::TSharedPointer<Actor>& actor)
+{
+	if (actor.isNull()) return false;
+	if (actor->getComponent<MeshRendererComponent>()) return false;
+	if (actor->getComponent<LightComponent>()) return false;
+
+	const std::string actorName = actor->getName();
+	if (actorName.empty()) return false;
+
+	std::filesystem::path resolvedPath;
+	const std::string legacyGuess = std::string("Assets/Models/") + actorName + ".obj";
+	if (!resolveOBJAssetPath(legacyGuess, actorName, resolvedPath)) {
+		return false;
+	}
+
+	if (!attachOBJAssetToActor(resolvedPath.string(), actor, false)) {
+		return false;
+	}
+
+	const std::wstring pathW(resolvedPath.wstring());
+	MESSAGE("Main", "loadScene", L"Recovered legacy OBJ actor '" << pathW << L"' from Assets/Models.");
+	return true;
+}
+
+bool BaseApp::importOBJModel(const std::string& path)
+{
+	if (path.empty()) {
+		return false;
+	}
+
+	namespace fs = std::filesystem;
+	fs::path resolvedPath;
+	if (!resolveOBJAssetPath(path, std::string(), resolvedPath)) {
+		ERROR("Main", "importOBJModel", ("OBJ file does not exist or is not a valid .obj: " + path).c_str());
+		return false;
+	}
+
+	std::string actorName = resolvedPath.stem().string();
+	if (actorName.empty()) actorName = "Imported OBJ";
+
+	EU::TSharedPointer<Actor> actor = EU::MakeShared<Actor>(m_device);
+	if (actor.isNull()) {
+		return false;
+	}
+	actor->setName(actorName);
+
+	if (!attachOBJAssetToActor(resolvedPath.string(), actor, true)) {
+		return false;
+	}
+
+	m_actors.push_back(actor);
+	m_sceneGraph.addEntity(actor.get());
+	m_gui.selectedActorIndex = static_cast<int>(m_actors.size()) - 1;
+
+	const std::wstring pathW(resolvedPath.wstring());
+	MESSAGE("Main", "importOBJModel", L"Imported OBJ successfully: " << pathW);
+	return true;
 }
 
 EU::TSharedPointer<Actor> BaseApp::createLightActor(const std::string& name)
@@ -1028,15 +2408,537 @@ EU::TSharedPointer<Actor> BaseApp::createLightActor(const std::string& name)
 	return lightActor;
 }
 
+
+void BaseApp::registerBuiltinActorMetadata(const EU::TSharedPointer<Actor>& actor, BuiltinMeshKind kind)
+{
+	if (actor.isNull() || kind == BuiltinMeshKind::None) return;
+	for (auto& asset : m_importedMeshAssets) {
+		if (asset && !asset->actor.isNull() && asset->actor.get() == actor.get()) {
+			asset->builtinKind = kind;
+			asset->sourcePath.clear();
+			return;
+		}
+	}
+	auto metadata = std::make_unique<ImportedMeshAsset>();
+	metadata->actor = actor;
+	metadata->builtinKind = kind;
+	m_importedMeshAssets.push_back(std::move(metadata));
+}
+
+void BaseApp::removeActorOwnedResources(const Actor* actor)
+{
+	if (!actor) return;
+
+	m_materialTextureOverrides.erase(
+		std::remove_if(m_materialTextureOverrides.begin(), m_materialTextureOverrides.end(),
+			[actor](const MaterialTextureOverride& textureOverride) {
+				return textureOverride.actor == actor;
+			}),
+		m_materialTextureOverrides.end());
+
+	for (auto it = m_importedMeshAssets.begin(); it != m_importedMeshAssets.end();) {
+		if (*it && !(*it)->actor.isNull() && (*it)->actor.get() == actor) {
+			if ((*it)->renderMesh) {
+				(*it)->renderMesh->destroy();
+			}
+			it = m_importedMeshAssets.erase(it);
+		}
+		else {
+			++it;
+		}
+	}
+}
+
+bool BaseApp::attachBuiltinMeshToActor(BuiltinMeshKind kind, const EU::TSharedPointer<Actor>& actor)
+{
+	if (actor.isNull() || kind == BuiltinMeshKind::None) return false;
+
+	Mesh* mesh = nullptr;
+	MaterialInstance* sourceInstance = nullptr;
+	bool castShadow = true;
+	switch (kind) {
+	case BuiltinMeshKind::Cube:
+		mesh = &m_cyberGunRenderMesh;
+		sourceInstance = &m_cyberGunMaterial;
+		break;
+	case BuiltinMeshKind::Pyramid:
+		mesh = &m_drakefireRenderMesh;
+		sourceInstance = &m_drakefireMaterial;
+		break;
+	case BuiltinMeshKind::Floor:
+		mesh = &m_toadRenderMesh;
+		sourceInstance = &m_toadMaterial;
+		castShadow = false;
+		break;
+	default:
+		return false;
+	}
+	if (!mesh || !sourceInstance || !sourceInstance->getMaterial()) return false;
+
+	removeActorOwnedResources(actor.get());
+
+	auto metadata = std::make_unique<ImportedMeshAsset>();
+	auto materialResource = std::make_unique<Material>();
+	auto materialInstance = std::make_unique<MaterialInstance>();
+	if (!metadata || !materialResource || !materialInstance) return false;
+
+	Material* sourceMaterial = sourceInstance->getMaterial();
+	materialResource->setShader(sourceMaterial->getShader());
+	materialResource->setRasterizerState(sourceMaterial->getRasterizerState());
+	materialResource->setDepthStencilState(sourceMaterial->getDepthStencilState());
+	materialResource->setSamplerState(sourceMaterial->getSamplerState());
+	materialResource->setDomain(sourceMaterial->getDomain());
+	materialResource->setBlendMode(sourceMaterial->getBlendMode());
+
+	materialInstance->setMaterial(materialResource.get());
+	materialInstance->setAlbedo(sourceInstance->getAlbedo());
+	materialInstance->setNormal(sourceInstance->getNormal());
+	materialInstance->setMetallic(sourceInstance->getMetallic());
+	materialInstance->setRoughness(sourceInstance->getRoughness());
+	materialInstance->setAO(sourceInstance->getAO());
+	materialInstance->setEmissive(sourceInstance->getEmissive());
+	materialInstance->getParams() = sourceInstance->getParams();
+
+	MaterialInstance* materialPtr = materialInstance.get();
+	if (!attachRenderer(actor, *mesh, *materialPtr, castShadow)) {
+		return false;
+	}
+
+	metadata->actor = actor;
+	metadata->builtinKind = kind;
+	metadata->materialResources.push_back(std::move(materialResource));
+	metadata->materials.push_back(std::move(materialInstance));
+	m_importedMeshAssets.push_back(std::move(metadata));
+	return true;
+}
+
+bool BaseApp::tryRestoreLegacyBuiltinActor(const EU::TSharedPointer<Actor>& actor)
+{
+	if (actor.isNull() || actor->getComponent<MeshRendererComponent>() || actor->getComponent<LightComponent>()) {
+		return false;
+	}
+
+	BuiltinMeshKind kind = BuiltinMeshKind::None;
+	const std::string name = actor->getName();
+	if (name == "Demo Cube") kind = BuiltinMeshKind::Cube;
+	else if (name == "Demo Pyramid") kind = BuiltinMeshKind::Pyramid;
+	else if (name == "Demo Floor") kind = BuiltinMeshKind::Floor;
+	if (kind == BuiltinMeshKind::None) return false;
+
+	return attachBuiltinMeshToActor(kind, actor);
+}
+
+std::string BaseApp::makeUniqueActorName(const std::string& desiredName, const Actor* ignoreActor) const
+{
+	std::string base = desiredName.empty() ? "Actor" : desiredName;
+	auto exists = [&](const std::string& candidate) {
+		for (const auto& actor : m_actors) {
+			if (!actor.isNull() && actor.get() != ignoreActor && actor->getName() == candidate) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	if (!exists(base)) return base;
+	for (int suffix = 2; suffix < 100000; ++suffix) {
+		const std::string candidate = base + " " + std::to_string(suffix);
+		if (!exists(candidate)) return candidate;
+	}
+	return base + " Copy";
+}
+
+void BaseApp::copyActorEditableState(const EU::TSharedPointer<Actor>& source,
+	const EU::TSharedPointer<Actor>& destination)
+{
+	if (source.isNull() || destination.isNull()) return;
+
+	auto sourceTransform = source->getComponent<Transform>();
+	auto destinationTransform = destination->getComponent<Transform>();
+	if (sourceTransform && destinationTransform) {
+		EU::Vector3 position = sourceTransform->getPosition();
+		// A small offset makes the duplicate immediately visible/selectable.
+		position.x += 0.35f;
+		position.z += 0.35f;
+		destinationTransform->setTransform(position,
+			sourceTransform->getRotation(),
+			sourceTransform->getScale());
+	}
+
+	auto sourceRenderer = source->getComponent<MeshRendererComponent>();
+	auto destinationRenderer = destination->getComponent<MeshRendererComponent>();
+	if (sourceRenderer && destinationRenderer) {
+		destinationRenderer->setVisible(sourceRenderer->isVisible());
+		destinationRenderer->setCastShadow(sourceRenderer->canCastShadow());
+
+		const auto& sourceMaterials = sourceRenderer->getMaterialInstances();
+		const auto& destinationMaterials = destinationRenderer->getMaterialInstances();
+		const size_t materialCount = (std::min)(sourceMaterials.size(), destinationMaterials.size());
+		for (size_t i = 0; i < materialCount; ++i) {
+			if (!sourceMaterials[i] || !destinationMaterials[i]) continue;
+			destinationMaterials[i]->getParams() = sourceMaterials[i]->getParams();
+			Material* sourceMaterial = sourceMaterials[i]->getMaterial();
+			Material* destinationMaterial = destinationMaterials[i]->getMaterial();
+			if (sourceMaterial && destinationMaterial) {
+				destinationMaterial->setDomain(sourceMaterial->getDomain());
+				destinationMaterial->setBlendMode(sourceMaterial->getBlendMode());
+			}
+		}
+
+		struct OverrideCopy {
+			size_t slot = 0;
+			MaterialTextureChannel channel = MaterialTextureChannel::Albedo;
+			std::string path;
+		};
+		std::vector<OverrideCopy> copies;
+		for (const auto& textureOverride : m_materialTextureOverrides) {
+			if (textureOverride.actor == source.get() && !textureOverride.sourcePath.empty()) {
+				copies.push_back({ textureOverride.materialSlot, textureOverride.channel, textureOverride.sourcePath });
+			}
+		}
+		for (const OverrideCopy& copy : copies) {
+			applyMaterialTextureOverride(destination, copy.slot, copy.channel, copy.path);
+		}
+	}
+
+	auto sourceLight = source->getComponent<LightComponent>();
+	if (sourceLight) {
+		auto destinationLight = destination->getComponent<LightComponent>();
+		if (!destinationLight) {
+			destinationLight = EU::MakeShared<LightComponent>();
+			destination->addComponent(destinationLight);
+		}
+		destinationLight->getLightData() = sourceLight->getLightData();
+		destinationLight->setCastShadow(sourceLight->canCastShadow());
+	}
+}
+
+bool BaseApp::duplicateActorAtIndex(int actorIndex)
+{
+	if (actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) return false;
+	const EU::TSharedPointer<Actor> source = m_actors[actorIndex];
+	if (source.isNull()) return false;
+
+	EU::TSharedPointer<Actor> duplicate = EU::MakeShared<Actor>(m_device);
+	if (duplicate.isNull()) return false;
+	duplicate->setName(makeUniqueActorName(source->getName() + " Copy"));
+
+	const ImportedMeshAsset* sourceAsset = findImportedMeshAsset(source.get());
+	auto sourceRenderer = source->getComponent<MeshRendererComponent>();
+	bool rendererReady = !sourceRenderer;
+
+	if (sourceAsset && !sourceAsset->sourcePath.empty()) {
+		rendererReady = attachOBJAssetToActor(sourceAsset->sourcePath, duplicate, false);
+	}
+	else if (sourceAsset && sourceAsset->builtinKind != BuiltinMeshKind::None) {
+		rendererReady = attachBuiltinMeshToActor(sourceAsset->builtinKind, duplicate);
+	}
+	else if (sourceRenderer && sourceRenderer->getMesh()) {
+		// Generic fallback for a mesh that predates asset metadata. It works in
+		// the current session; all built-in and OBJ assets created by V13 carry
+		// metadata and therefore use one of the persistent branches above.
+		auto metadata = std::make_unique<ImportedMeshAsset>();
+		std::vector<MaterialInstance*> materialPointers;
+		for (MaterialInstance* sourceInstance : sourceRenderer->getMaterialInstances()) {
+			if (!sourceInstance || !sourceInstance->getMaterial()) continue;
+			auto materialResource = std::make_unique<Material>();
+			auto materialInstance = std::make_unique<MaterialInstance>();
+			if (!materialResource || !materialInstance) return false;
+
+			Material* sourceMaterial = sourceInstance->getMaterial();
+			materialResource->setShader(sourceMaterial->getShader());
+			materialResource->setRasterizerState(sourceMaterial->getRasterizerState());
+			materialResource->setDepthStencilState(sourceMaterial->getDepthStencilState());
+			materialResource->setSamplerState(sourceMaterial->getSamplerState());
+			materialResource->setDomain(sourceMaterial->getDomain());
+			materialResource->setBlendMode(sourceMaterial->getBlendMode());
+
+			materialInstance->setMaterial(materialResource.get());
+			materialInstance->setAlbedo(sourceInstance->getAlbedo());
+			materialInstance->setNormal(sourceInstance->getNormal());
+			materialInstance->setMetallic(sourceInstance->getMetallic());
+			materialInstance->setRoughness(sourceInstance->getRoughness());
+			materialInstance->setAO(sourceInstance->getAO());
+			materialInstance->setEmissive(sourceInstance->getEmissive());
+			materialInstance->getParams() = sourceInstance->getParams();
+			materialPointers.push_back(materialInstance.get());
+			metadata->materialResources.push_back(std::move(materialResource));
+			metadata->materials.push_back(std::move(materialInstance));
+		}
+		if (!materialPointers.empty()) {
+			rendererReady = attachRenderer(duplicate, *sourceRenderer->getMesh(),
+				materialPointers, sourceRenderer->canCastShadow());
+			metadata->actor = duplicate;
+			m_importedMeshAssets.push_back(std::move(metadata));
+		}
+	}
+
+	if (!rendererReady) {
+		removeActorOwnedResources(duplicate.get());
+		return false;
+	}
+
+	copyActorEditableState(source, duplicate);
+	m_actors.push_back(duplicate);
+	m_sceneGraph.addEntity(duplicate.get());
+	m_gui.selectedActorIndex = static_cast<int>(m_actors.size()) - 1;
+
+	const std::string duplicateName = duplicate->getName();
+	const std::wstring nameW(duplicateName.begin(), duplicateName.end());
+	MESSAGE("Main", "duplicateActor", L"Duplicated actor: " << nameW);
+	return true;
+}
+
+bool BaseApp::deleteActorAtIndex(int actorIndex)
+{
+	if (actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) return false;
+	EU::TSharedPointer<Actor> victim = m_actors[actorIndex];
+	if (victim.isNull()) return false;
+
+	Actor* rawActor = victim.get();
+	const std::string actorName = victim->getName();
+	m_sceneGraph.removeEntity(rawActor);
+	removeActorOwnedResources(rawActor);
+
+	if (!m_cyberGun.isNull() && m_cyberGun.get() == rawActor) m_cyberGun.reset();
+	if (!m_drakefirePistol.isNull() && m_drakefirePistol.get() == rawActor) m_drakefirePistol.reset();
+	if (!m_sciFiToad.isNull() && m_sciFiToad.get() == rawActor) m_sciFiToad.reset();
+	if (!m_directionalLightActor.isNull() && m_directionalLightActor.get() == rawActor) m_directionalLightActor.reset();
+
+	m_actors.erase(m_actors.begin() + actorIndex);
+	if (m_actors.empty()) {
+		m_gui.selectedActorIndex = -1;
+	}
+	else {
+		m_gui.selectedActorIndex = (std::min)(actorIndex, static_cast<int>(m_actors.size()) - 1);
+	}
+
+	if (m_directionalLightActor.isNull()) {
+		for (const auto& actor : m_actors) {
+			if (actor.isNull()) continue;
+			auto light = actor->getComponent<LightComponent>();
+			if (light && light->getLightData().type == LightType::Directional) {
+				m_directionalLightActor = actor;
+				break;
+			}
+		}
+	}
+
+	const std::wstring nameW(actorName.begin(), actorName.end());
+	MESSAGE("Main", "deleteActor", L"Deleted actor: " << nameW);
+	return true;
+}
+
+bool BaseApp::renameActorAtIndex(int actorIndex, const std::string& newName)
+{
+	if (actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) return false;
+	EU::TSharedPointer<Actor> actor = m_actors[actorIndex];
+	if (actor.isNull()) return false;
+
+	const size_t first = newName.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos) return false;
+	const size_t last = newName.find_last_not_of(" \t\r\n");
+	const std::string trimmed = newName.substr(first, last - first + 1);
+	if (trimmed.empty()) return false;
+
+	actor->setName(makeUniqueActorName(trimmed, actor.get()));
+	return true;
+}
+
+void BaseApp::clearCurrentSceneActors()
+{
+	m_renderScene.clear();
+	m_sceneGraph.destroy();
+
+	m_materialTextureOverrides.clear();
+
+	m_cyberGun.reset();
+	m_drakefirePistol.reset();
+	m_sciFiToad.reset();
+	m_directionalLightActor.reset();
+	m_actors.clear();
+
+	for (auto& asset : m_importedMeshAssets) {
+		if (asset && asset->renderMesh) {
+			asset->renderMesh->destroy();
+		}
+	}
+	m_importedMeshAssets.clear();
+	m_gui.selectedActorIndex = -1;
+}
+
+void BaseApp::createNewScene()
+{
+	clearCurrentSceneActors();
+	m_currentScenePath.clear();
+
+	EU::TSharedPointer<Actor> lightActor = createLightActor("Light Actor 1");
+	if (!lightActor.isNull()) {
+		auto light = lightActor->getComponent<LightComponent>();
+		if (light) {
+			light->getLightData().type = LightType::Directional;
+			light->getLightData().direction = EU::Vector3(-0.20f, -1.0f, 1.0f);
+			light->getLightData().color = EU::Vector3(1.0f, 1.0f, 1.0f);
+			light->getLightData().intensity = 1.0f;
+			light->setCastShadow(true);
+		}
+		m_directionalLightActor = lightActor;
+		m_gui.selectedActorIndex = 0;
+	}
+
+	MESSAGE("Main", "Scene", "Created a new empty scene.");
+}
+
+bool BaseApp::isValidSceneFileHeader(const std::string& path) const
+{
+	if (path.empty()) return false;
+	std::ifstream stream(path);
+	std::string magic;
+	int version = 0;
+	return stream.is_open() &&
+		(stream >> magic >> version) &&
+		magic == "WVSCENE" &&
+		version >= 1 &&
+		version <= kCurrentSceneVersion;
+}
+
+bool BaseApp::openSceneFromDialog()
+{
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	fs::create_directories("Saved", ec);
+	std::string initialDirectory;
+	const fs::path savedPath = fs::absolute("Saved", ec);
+	if (!ec) initialDirectory = savedPath.string();
+
+	char fileName[32768] = {};
+	OPENFILENAMEA dialog{};
+	dialog.lStructSize = sizeof(dialog);
+	dialog.hwndOwner = m_window.m_hWnd;
+	dialog.lpstrFilter = "Wildvine Scene (*.wvscene)\0*.wvscene\0All files (*.*)\0*.*\0\0";
+	dialog.lpstrFile = fileName;
+	dialog.nMaxFile = static_cast<DWORD>(sizeof(fileName));
+	dialog.lpstrTitle = "Open Wildvine Scene";
+	dialog.lpstrDefExt = "wvscene";
+	dialog.lpstrInitialDir = initialDirectory.empty() ? nullptr : initialDirectory.c_str();
+	dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+
+	if (!GetOpenFileNameA(&dialog)) {
+		const DWORD errorCode = CommDlgExtendedError();
+		if (errorCode != 0) {
+			ERROR("Main", "openScene", ("Windows open-scene dialog failed. Code: " + std::to_string(errorCode)).c_str());
+		}
+		return false;
+	}
+
+	if (!isValidSceneFileHeader(fileName)) {
+		ERROR("Main", "openScene", "The selected file is not a supported Wildvine scene.");
+		return false;
+	}
+
+	clearCurrentSceneActors();
+	if (!loadScene(fileName)) {
+		ERROR("Main", "openScene", "Scene parsing failed. A fresh scene will be created.");
+		createNewScene();
+		return false;
+	}
+	m_gui.selectedActorIndex = m_actors.empty() ? -1 : 0;
+	return true;
+}
+
+bool BaseApp::saveSceneAsFromDialog()
+{
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	fs::create_directories("Saved", ec);
+
+	char fileName[32768] = {};
+	std::string suggested = "Scene.wvscene";
+	if (!m_currentScenePath.empty()) {
+		const fs::path currentPath(m_currentScenePath);
+		if (!currentPath.filename().empty()) suggested = currentPath.filename().string();
+	}
+	std::snprintf(fileName, sizeof(fileName), "%s", suggested.c_str());
+
+	OPENFILENAMEA dialog{};
+	dialog.lStructSize = sizeof(dialog);
+	dialog.hwndOwner = m_window.m_hWnd;
+	dialog.lpstrFilter = "Wildvine Scene (*.wvscene)\0*.wvscene\0All files (*.*)\0*.*\0\0";
+	dialog.lpstrFile = fileName;
+	dialog.nMaxFile = static_cast<DWORD>(sizeof(fileName));
+	std::string initialDirectory;
+	const fs::path savedPath = fs::absolute("Saved", ec);
+	if (!ec) initialDirectory = savedPath.string();
+
+	dialog.lpstrTitle = "Save Wildvine Scene As";
+	dialog.lpstrDefExt = "wvscene";
+	dialog.lpstrInitialDir = initialDirectory.empty() ? nullptr : initialDirectory.c_str();
+	dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+
+	if (!GetSaveFileNameA(&dialog)) {
+		const DWORD errorCode = CommDlgExtendedError();
+		if (errorCode != 0) {
+			ERROR("Main", "saveSceneAs", ("Windows save-scene dialog failed. Code: " + std::to_string(errorCode)).c_str());
+		}
+		return false;
+	}
+	return saveScene(fileName);
+}
+
+void BaseApp::handlePendingSceneEditorAction()
+{
+	SceneEditorRequest request{};
+	if (!m_gui.consumeSceneEditorRequest(request)) return;
+
+	switch (request.action) {
+	case SceneEditorAction::NewScene:
+		createNewScene();
+		break;
+	case SceneEditorAction::OpenScene:
+		openSceneFromDialog();
+		break;
+	case SceneEditorAction::SaveSceneAs:
+		saveSceneAsFromDialog();
+		break;
+	case SceneEditorAction::DuplicateActor:
+		duplicateActorAtIndex(request.actorIndex);
+		break;
+	case SceneEditorAction::DeleteActor:
+		deleteActorAtIndex(request.actorIndex);
+		break;
+	case SceneEditorAction::RenameActor:
+		renameActorAtIndex(request.actorIndex, request.text);
+		break;
+	default:
+		break;
+	}
+}
+
 bool BaseApp::saveScene(const std::string& path)
 {
-	std::ofstream stream(path, std::ios::trunc);
+	if (path.empty()) {
+		ERROR("Main", "saveScene", "Scene path cannot be empty.");
+		return false;
+	}
+
+	std::error_code directoryError;
+	const std::filesystem::path scenePath(path);
+	const std::filesystem::path parentPath = scenePath.parent_path();
+	if (!parentPath.empty()) {
+		std::filesystem::create_directories(parentPath, directoryError);
+		if (directoryError) {
+			ERROR("Main", "saveScene", ("Failed to create scene directory: " + parentPath.string()).c_str());
+			return false;
+		}
+	}
+
+	std::ofstream stream(scenePath, std::ios::trunc);
 	if (!stream.is_open()) {
 		ERROR("Main", "saveScene", ("Failed to open scene file for writing: " + path).c_str());
 		return false;
 	}
 
-	stream << "WVSCENE 1\n";
+	stream << "WVSCENE " << kCurrentSceneVersion << "\n";
 	stream << "ACTOR_COUNT " << m_actors.size() << "\n";
 
 	for (size_t actorIndex = 0; actorIndex < m_actors.size(); ++actorIndex) {
@@ -1046,6 +2948,15 @@ bool BaseApp::saveScene(const std::string& path)
 		}
 
 		stream << "ACTOR " << actorIndex << " " << std::quoted(actor->getName()) << "\n";
+
+		if (const ImportedMeshAsset* importedAsset = findImportedMeshAsset(actor.get())) {
+			if (!importedAsset->sourcePath.empty()) {
+				stream << "OBJ_ASSET " << std::quoted(importedAsset->sourcePath) << "\n";
+			}
+			else if (importedAsset->builtinKind != BuiltinMeshKind::None) {
+				stream << "BUILTIN_MESH " << static_cast<int>(importedAsset->builtinKind) << "\n";
+			}
+		}
 
 		EU::TSharedPointer<Transform> transform = actor->getComponent<Transform>();
 		if (transform) {
@@ -1063,11 +2974,15 @@ bool BaseApp::saveScene(const std::string& path)
 			stream << "CAST_SHADOW " << (meshRenderer->canCastShadow() ? 1 : 0) << "\n";
 
 			const std::vector<MaterialInstance*>& materials = meshRenderer->getMaterialInstances();
+			if (materials.size() > kMaxSerializedMaterialsPerActor) {
+				ERROR("Main", "saveScene", "Too many materials on an actor to serialize safely.");
+				return false;
+			}
 			stream << "MATERIAL_COUNT " << materials.size() << "\n";
 			for (size_t i = 0; i < materials.size(); ++i) {
 				MaterialInstance* materialInstance = materials[i];
 				if (!materialInstance) {
-					stream << "MATERIAL " << i << " 0 0 1 1 1 1 0 1 1 1 0.5\n";
+					stream << "MATERIAL " << i << " 0 0 1 1 1 1 0 1 1 1 1 0.5\n";
 					continue;
 				}
 
@@ -1087,7 +3002,20 @@ bool BaseApp::saveScene(const std::string& path)
 					<< params.roughness << " "
 					<< params.ao << " "
 					<< params.normalScale << " "
+					<< params.emissiveStrength << " "
 					<< params.alphaCutoff << "\n";
+			}
+
+			for (const MaterialTextureOverride& textureOverride : m_materialTextureOverrides) {
+				if (textureOverride.actor != actor.get() ||
+					textureOverride.materialSlot >= materials.size() ||
+					textureOverride.sourcePath.empty()) {
+					continue;
+				}
+				stream << "MATERIAL_TEXTURE "
+					<< textureOverride.materialSlot << " "
+					<< static_cast<int>(textureOverride.channel) << " "
+					<< std::quoted(textureOverride.sourcePath) << "\n";
 			}
 		}
 
@@ -1109,6 +3037,10 @@ bool BaseApp::saveScene(const std::string& path)
 		}
 
 		stream << "END_ACTOR\n";
+		if (!stream) {
+			ERROR("Main", "saveScene", "Failed while writing scene data.");
+			return false;
+		}
 	}
 
 	stream << "LIGHT "
@@ -1120,110 +3052,162 @@ bool BaseApp::saveScene(const std::string& path)
 		<< m_constantBufferStruct.LightColor.z << "\n";
 
 	stream << "END_SCENE\n";
+	stream.flush();
+	if (!stream) {
+		ERROR("Main", "saveScene", "Failed to flush scene file to disk.");
+		return false;
+	}
+
+	m_currentScenePath = path;
 	const std::wstring pathW(path.begin(), path.end());
-	MESSAGE("Main", "saveScene", L"Saved scene to '" << pathW << L"'")
-		return true;
+	MESSAGE("Main", "saveScene", L"Saved scene to '" << pathW << L"'");
+	return true;
 }
 
 bool BaseApp::loadScene(const std::string& path)
 {
-	std::ifstream stream(path);
+	if (path.empty()) {
+		return false;
+	}
+	const std::filesystem::path scenePath(path);
+	std::ifstream stream(scenePath);
 	if (!stream.is_open()) {
 		return false;
 	}
 
 	std::string token;
-	stream >> token;
-	if (token != "WVSCENE") {
+	if (!(stream >> token) || token != "WVSCENE") {
 		return false;
 	}
 
 	int version = 0;
-	stream >> version;
-	if (version != 1) {
+	if (!(stream >> version) || version < 1 || version > kCurrentSceneVersion) {
 		return false;
 	}
 
+	size_t declaredActorCount = 0;
+	bool hasDeclaredActorCount = false;
+	bool foundEndScene = false;
 	EU::TSharedPointer<Actor> currentActor;
+
 	while (stream >> token) {
 		if (token == "ACTOR_COUNT") {
-			size_t ignoredCount = 0;
-			stream >> ignoredCount;
+			if (!(stream >> declaredActorCount) || declaredActorCount > kMaxSerializedActors) {
+				return false;
+			}
+			hasDeclaredActorCount = true;
 		}
 		else if (token == "ACTOR") {
 			size_t actorIndex = 0;
 			std::string actorName;
-			stream >> actorIndex >> std::quoted(actorName);
-			currentActor = EU::TSharedPointer<Actor>();
+			if (!(stream >> actorIndex >> std::quoted(actorName))) {
+				return false;
+			}
+			if (actorIndex >= kMaxSerializedActors ||
+				(hasDeclaredActorCount && actorIndex >= declaredActorCount)) {
+				return false;
+			}
+
+			currentActor.reset();
 			while (actorIndex >= m_actors.size()) {
 				EU::TSharedPointer<Actor> newActor = EU::MakeShared<Actor>(m_device);
 				if (newActor.isNull()) {
-					break;
+					return false;
 				}
 				newActor->setName("Actor " + std::to_string(m_actors.size() + 1));
 				m_actors.push_back(newActor);
 				m_sceneGraph.addEntity(newActor.get());
 			}
-			if (actorIndex < m_actors.size()) {
-				currentActor = m_actors[actorIndex];
+
+			currentActor = m_actors[actorIndex];
+			if (currentActor.isNull()) {
+				return false;
 			}
-			if (!currentActor.isNull()) {
-				currentActor->setName(actorName);
-				if (isSerializedLightActorName(actorName)) {
-					ensureDefaultLightComponent(currentActor);
+			currentActor->setName(actorName);
+			if (isSerializedLightActorName(actorName)) {
+				ensureDefaultLightComponent(currentActor);
+				if (m_directionalLightActor.isNull()) {
+					m_directionalLightActor = currentActor;
 				}
+			}
+			else {
+				// v1-v4 did not persist procedural mesh identity. Restore the demo
+				// shape by name early so following MATERIAL/VISIBLE tokens apply.
+				if (version < 5) {
+					tryRestoreLegacyBuiltinActor(currentActor);
+				}
+				if (version < 3) {
+					// v1/v2 scenes only stored the actor itself. Rebuild a matching OBJ
+					// before reading visibility/material tokens so those values can be restored too.
+					tryRestoreLegacyOBJActor(currentActor);
+				}
+			}
+		}
+		else if (token == "OBJ_ASSET" && !currentActor.isNull()) {
+			std::string assetPath;
+			if (!(stream >> std::quoted(assetPath)) || assetPath.empty()) {
+				return false;
+			}
+
+			if (!attachOBJAssetToActor(assetPath, currentActor, false)) {
+				const std::wstring assetPathW(assetPath.begin(), assetPath.end());
+				MESSAGE("Main", "loadScene", L"OBJ asset is unavailable. Actor will remain in the hierarchy without a mesh: " << assetPathW);
+			}
+		}
+		else if (token == "BUILTIN_MESH" && !currentActor.isNull()) {
+			int builtinKindValue = 0;
+			if (!(stream >> builtinKindValue) ||
+				builtinKindValue < static_cast<int>(BuiltinMeshKind::Cube) ||
+				builtinKindValue > static_cast<int>(BuiltinMeshKind::Floor)) {
+				return false;
+			}
+			if (!attachBuiltinMeshToActor(static_cast<BuiltinMeshKind>(builtinKindValue), currentActor)) {
+				ERROR("Main", "loadScene", "Failed to reconstruct built-in mesh actor.");
+				return false;
 			}
 		}
 		else if (token == "POSITION" && !currentActor.isNull()) {
 			float x = 0.0f, y = 0.0f, z = 0.0f;
-			stream >> x >> y >> z;
+			if (!(stream >> x >> y >> z) || !isFinite(EU::Vector3(x, y, z))) return false;
 			EU::TSharedPointer<Transform> transform = currentActor->getComponent<Transform>();
-			if (transform) {
-				transform->setPosition(EU::Vector3(x, y, z));
-			}
+			if (transform) transform->setPosition(EU::Vector3(x, y, z));
 		}
 		else if (token == "ROTATION" && !currentActor.isNull()) {
 			float x = 0.0f, y = 0.0f, z = 0.0f;
-			stream >> x >> y >> z;
+			if (!(stream >> x >> y >> z) || !isFinite(EU::Vector3(x, y, z))) return false;
 			EU::TSharedPointer<Transform> transform = currentActor->getComponent<Transform>();
-			if (transform) {
-				transform->setRotation(EU::Vector3(x, y, z));
-			}
+			if (transform) transform->setRotation(EU::Vector3(x, y, z));
 		}
 		else if (token == "SCALE" && !currentActor.isNull()) {
 			float x = 1.0f, y = 1.0f, z = 1.0f;
-			stream >> x >> y >> z;
+			if (!(stream >> x >> y >> z) || !isFinite(EU::Vector3(x, y, z))) return false;
 			EU::TSharedPointer<Transform> transform = currentActor->getComponent<Transform>();
-			if (transform) {
-				transform->setScale(EU::Vector3(x, y, z));
-			}
+			if (transform) transform->setScale(EU::Vector3(x, y, z));
 		}
 		else if (token == "VISIBLE" && !currentActor.isNull()) {
 			int value = 1;
-			stream >> value;
+			if (!(stream >> value)) return false;
 			EU::TSharedPointer<MeshRendererComponent> meshRenderer = currentActor->getComponent<MeshRendererComponent>();
-			if (meshRenderer) {
-				meshRenderer->setVisible(value != 0);
-			}
+			if (meshRenderer) meshRenderer->setVisible(value != 0);
 		}
 		else if (token == "CAST_SHADOW" && !currentActor.isNull()) {
 			int value = 1;
-			stream >> value;
+			if (!(stream >> value)) return false;
 			EU::TSharedPointer<MeshRendererComponent> meshRenderer = currentActor->getComponent<MeshRendererComponent>();
-			if (meshRenderer) {
-				meshRenderer->setCastShadow(value != 0);
-			}
+			if (meshRenderer) meshRenderer->setCastShadow(value != 0);
 		}
 		else if (token == "MATERIAL_COUNT") {
-			size_t ignoredCount = 0;
-			stream >> ignoredCount;
+			size_t materialCount = 0;
+			if (!(stream >> materialCount) || materialCount > kMaxSerializedMaterialsPerActor) {
+				return false;
+			}
 		}
 		else if (token == "MATERIAL" && !currentActor.isNull()) {
 			size_t materialIndex = 0;
 			int domain = 0;
 			int blendMode = 0;
 			MaterialParams params{};
-			stream >> materialIndex
+			if (!(stream >> materialIndex
 				>> domain
 				>> blendMode
 				>> params.baseColor.x
@@ -1233,8 +3217,27 @@ bool BaseApp::loadScene(const std::string& path)
 				>> params.metallic
 				>> params.roughness
 				>> params.ao
-				>> params.normalScale
-				>> params.alphaCutoff;
+				>> params.normalScale)) {
+				return false;
+			}
+
+			if (version >= 2) {
+				if (!(stream >> params.emissiveStrength >> params.alphaCutoff)) return false;
+			}
+			else {
+				if (!(stream >> params.alphaCutoff)) return false;
+			}
+
+			if (!areFinite(params)) return false;
+			if (materialIndex >= kMaxSerializedMaterialsPerActor) return false;
+			if (domain < static_cast<int>(MaterialDomain::Opaque) ||
+				domain > static_cast<int>(MaterialDomain::Transparent)) {
+				domain = static_cast<int>(MaterialDomain::Opaque);
+			}
+			if (blendMode < static_cast<int>(BlendMode::Opaque) ||
+				blendMode > static_cast<int>(BlendMode::PremultipliedAlpha)) {
+				blendMode = static_cast<int>(BlendMode::Opaque);
+			}
 
 			EU::TSharedPointer<MeshRendererComponent> meshRenderer = currentActor->getComponent<MeshRendererComponent>();
 			if (meshRenderer) {
@@ -1249,11 +3252,28 @@ bool BaseApp::loadScene(const std::string& path)
 				}
 			}
 		}
+		else if (token == "MATERIAL_TEXTURE" && !currentActor.isNull()) {
+			size_t materialIndex = 0;
+			int channelValue = 0;
+			std::string texturePath;
+			if (!(stream >> materialIndex >> channelValue >> std::quoted(texturePath))) {
+				return false;
+			}
+			if (materialIndex >= kMaxSerializedMaterialsPerActor || !isValidMaterialTextureChannel(channelValue)) {
+				return false;
+			}
+
+			const MaterialTextureChannel channel = static_cast<MaterialTextureChannel>(channelValue);
+			if (!applyMaterialTextureOverride(currentActor, materialIndex, channel, texturePath)) {
+				const std::wstring texturePathW(texturePath.begin(), texturePath.end());
+				MESSAGE("Main", "loadScene", L"Material texture override is unavailable; imported/default texture will be used: " << texturePathW);
+			}
+		}
 		else if (token == "LIGHT_COMPONENT" && !currentActor.isNull()) {
 			int type = 0;
 			int castShadow = 0;
 			LightData light{};
-			stream >> type
+			if (!(stream >> type
 				>> light.color.x
 				>> light.color.y
 				>> light.color.z
@@ -1263,7 +3283,17 @@ bool BaseApp::loadScene(const std::string& path)
 				>> light.direction.z
 				>> light.range
 				>> light.spotAngle
-				>> castShadow;
+				>> castShadow)) {
+				return false;
+			}
+
+			if (!isFinite(light.color) ||
+				!isFinite(light.intensity) ||
+				!isFinite(light.direction) ||
+				!isFinite(light.range) ||
+				!isFinite(light.spotAngle)) {
+				return false;
+			}
 
 			if (type < static_cast<int>(LightType::Directional) || type > static_cast<int>(LightType::Spot)) {
 				type = static_cast<int>(LightType::Point);
@@ -1279,12 +3309,18 @@ bool BaseApp::loadScene(const std::string& path)
 			lightComponent->setCastShadow(castShadow != 0);
 		}
 		else if (token == "LIGHT") {
-			stream >> m_constantBufferStruct.LightDir.x
+			if (!(stream >> m_constantBufferStruct.LightDir.x
 				>> m_constantBufferStruct.LightDir.y
 				>> m_constantBufferStruct.LightDir.z
 				>> m_constantBufferStruct.LightColor.x
 				>> m_constantBufferStruct.LightColor.y
-				>> m_constantBufferStruct.LightColor.z;
+				>> m_constantBufferStruct.LightColor.z)) {
+				return false;
+			}
+			if (!isFinite(m_constantBufferStruct.LightDir) ||
+				!isFinite(m_constantBufferStruct.LightColor)) {
+				return false;
+			}
 
 			if (!m_directionalLightActor.isNull()) {
 				EU::TSharedPointer<LightComponent> lightComponent = m_directionalLightActor->getComponent<LightComponent>();
@@ -1295,16 +3331,60 @@ bool BaseApp::loadScene(const std::string& path)
 			}
 		}
 		else if (token == "END_ACTOR") {
-			currentActor = EU::TSharedPointer<Actor>();
+			// Legacy scenes did not persist procedural mesh identity. Recover the
+			// original demo actors by name before trying the OBJ fallback.
+			if (!currentActor.isNull()) {
+				tryRestoreLegacyBuiltinActor(currentActor);
+				// Scene versions prior to v3 did not persist imported asset paths.
+				// Recover an OBJ automatically when an empty actor has a matching
+				// Assets/Models/<ActorName>.obj file (for example SampleSphere.obj).
+				tryRestoreLegacyOBJActor(currentActor);
+			}
+			currentActor.reset();
 		}
 		else if (token == "END_SCENE") {
+			foundEndScene = true;
+			break;
+		}
+		else {
+			// Versiones soportadas tienen un vocabulario cerrado. Rechazar tokens
+			// desconocidos evita aceptar silenciosamente archivos truncados/corruptos.
+			return false;
+		}
+	}
+
+	if (!foundEndScene) {
+		return false;
+	}
+
+	// Reconcile the runtime actor list with the serialized actor count. This is
+	// what makes deletions persistent even though startup initially creates the
+	// built-in demo actors before loading DefaultScene.
+	if (hasDeclaredActorCount) {
+		while (m_actors.size() > declaredActorCount) {
+			if (!deleteActorAtIndex(static_cast<int>(m_actors.size()) - 1)) {
+				return false;
+			}
+		}
+		if (m_actors.size() != declaredActorCount) {
+			return false;
+		}
+	}
+
+	m_directionalLightActor.reset();
+	for (const auto& actor : m_actors) {
+		if (actor.isNull()) continue;
+		auto light = actor->getComponent<LightComponent>();
+		if (light && light->getLightData().type == LightType::Directional) {
+			m_directionalLightActor = actor;
 			break;
 		}
 	}
 
+	m_currentScenePath = path;
 	const std::wstring pathW(path.begin(), path.end());
-	MESSAGE("Main", "loadScene", L"Loaded scene from '" << pathW << L"'")
-		return true;
+	MESSAGE("Main", "loadScene", L"Loaded scene from '" << pathW << L"'");
+	return true;
 }
 
 

@@ -6,6 +6,7 @@
 #include "Rendering/DeferredRenderer.h"
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include "Device.h"
 #include "DeviceContext.h"
 #include "EngineUtilities/Utilities/Camera.h"
@@ -18,49 +19,17 @@
 namespace {
 	constexpr unsigned int kGBufferTargetCount = 4;
 
-	struct RenderTargetViewAccess {
-		ID3D11RenderTargetView* m_renderTargetView = nullptr;
-	};
-
-	struct EditorViewportPassAccess {
-		Texture m_colorTexture;
-		Texture m_colorSRV;
-		RenderTargetView m_rtv;
-		Texture m_depthTexture;
-		DepthStencilView m_dsv;
-		unsigned int m_width = 1;
-		unsigned int m_height = 1;
-	};
-
-	ID3D11RenderTargetView* ResolveViewportRTV(EditorViewportPass& pass) {
-		EditorViewportPassAccess* access = reinterpret_cast<EditorViewportPassAccess*>(&pass);
-		RenderTargetViewAccess* rtvAccess = reinterpret_cast<RenderTargetViewAccess*>(&access->m_rtv);
-		return rtvAccess->m_renderTargetView;
-	}
-
-	ID3D11DepthStencilView* ResolveViewportDSV(EditorViewportPass& pass) {
-		EditorViewportPassAccess* access = reinterpret_cast<EditorViewportPassAccess*>(&pass);
-		return access->m_dsv.m_depthStencilView;
-	}
-
-	ID3D11RenderTargetView* ResolveRTV(RenderTargetView& view) {
-		RenderTargetViewAccess* access = reinterpret_cast<RenderTargetViewAccess*>(&view);
-		return access->m_renderTargetView;
-	}
-
-	const LightData*
-		findPrimaryShadowLight(const RenderScene& scene) {
+	const LightData* findPrimaryShadowLight(const RenderScene& scene) {
 		for (const LightData& light : scene.directionalLights) {
-			if (light.type == LightType::Directional) {
+			if (light.type == LightType::Directional && light.castShadow) {
 				return &light;
 			}
 		}
-
-		return scene.directionalLights.empty() ? nullptr : &scene.directionalLights.front();
+		return nullptr;
 	}
 
-	void
-		writeLightToFrameBuffer(CBPerFrame& buffer, int lightIndex, const LightData& light) {
+	void writeLightToFrameBuffer(CBPerFrame& buffer, int lightIndex, const LightData& light) {
+		if (lightIndex < 0 || lightIndex >= kMaxSceneLights) return;
 		const float range = light.range > 0.0f ? light.range : 10.0f;
 		const EU::Vector3 lightColor = light.color * light.intensity;
 		buffer.LightPositionsRanges[lightIndex] = XMFLOAT4(light.position.x, light.position.y, light.position.z, range);
@@ -71,6 +40,7 @@ namespace {
 
 HRESULT
 DeferredRenderer::init(Device& device) {
+	destroy();
 	HRESULT hr = m_perFrameBuffer.init(device, sizeof(CBPerFrame));
 	if (FAILED(hr)) {
 		return hr;
@@ -148,15 +118,28 @@ DeferredRenderer::init(Device& device) {
 	return S_OK;
 }
 
-void
+HRESULT
 DeferredRenderer::resize(Device& device, unsigned int width, unsigned int height) {
 	if (width < 64) width = 64;
 	if (height < 64) height = 64;
 
+	EditorViewportPass replacementPreShadow;
+	HRESULT hr = replacementPreShadow.init(device, width, height);
+	if (FAILED(hr)) {
+		ERROR("DeferredRenderer", "resize", "Failed to resize pre-shadow debug pass.");
+		return hr;
+	}
+
+	hr = createGBufferResources(device, width, height);
+	if (FAILED(hr)) {
+		ERROR("DeferredRenderer", "resize", "Failed to recreate GBuffer resources.");
+		return hr;
+	}
+
+	m_preShadowDebugPass.swap(replacementPreShadow);
 	m_renderWidth = width;
 	m_renderHeight = height;
-	m_preShadowDebugPass.resize(device, width, height);
-	createGBufferResources(device, width, height);
+	return S_OK;
 }
 
 void
@@ -236,7 +219,7 @@ DeferredRenderer::buildQueues(RenderScene& scene, const Camera& camera) {
 	std::sort(m_opaqueQueue.begin(), m_opaqueQueue.end(),
 		[](const RenderObject* lhs, const RenderObject* rhs) {
 			if (lhs->materialInstance != rhs->materialInstance) {
-				return lhs->materialInstance < rhs->materialInstance;
+				return std::less<MaterialInstance*>{}(lhs->materialInstance, rhs->materialInstance);
 			}
 			return lhs->distanceToCamera < rhs->distanceToCamera;
 		});
@@ -296,10 +279,15 @@ void
 DeferredRenderer::updateLightMatrices(const Camera& camera, const RenderScene& scene) {
 	EU::Vector3 lightDir = EU::Vector3(0.0f, -1.0f, 0.0f);
 	const LightData* primaryShadowLight = findPrimaryShadowLight(scene);
+	m_hasShadowCastingLight = primaryShadowLight != nullptr;
 	if (primaryShadowLight) {
 		lightDir = primaryShadowLight->direction;
 	}
 
+	const float lightDirLengthSq = lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z;
+	if (!std::isfinite(lightDirLengthSq) || lightDirLengthSq <= 1e-8f) {
+		lightDir = EU::Vector3(0.0f, -1.0f, 0.0f);
+	}
 	XMVECTOR lightDirVec = XMVector3Normalize(XMVectorSet(lightDir.x, lightDir.y, lightDir.z, 0.0f));
 	XMVECTOR cameraPos = XMVectorSet(camera.getPosition().x, camera.getPosition().y, camera.getPosition().z, 1.0f);
 	XMVECTOR lightTarget = cameraPos;
@@ -324,11 +312,11 @@ DeferredRenderer::renderSceneToTarget(DeviceContext& deviceContext,
 	targetPass.begin(deviceContext, clearColor);
 	targetPass.setViewport(deviceContext);
 
-	m_applyShadows = applyShadows;
-	bindGBufferTargets(deviceContext, ResolveViewportDSV(targetPass));
+	m_applyShadows = applyShadows && m_hasShadowCastingLight;
+	bindGBufferTargets(deviceContext, targetPass.getDSV());
 	renderGeometryPass(deviceContext);
 
-	bindFinalTarget(deviceContext, ResolveViewportRTV(targetPass), ResolveViewportDSV(targetPass));
+	bindFinalTarget(deviceContext, targetPass.getRTV(), targetPass.getDSV());
 	renderLightingPass(deviceContext);
 	renderSkyboxPass(deviceContext, scene);
 	renderTransparentPass(deviceContext);
@@ -339,10 +327,10 @@ DeferredRenderer::bindGBufferTargets(DeviceContext& deviceContext, ID3D11DepthSt
 	clearDeferredSRVs(deviceContext);
 
 	ID3D11RenderTargetView* renderTargets[kGBufferTargetCount] = {
-		ResolveRTV(m_gBufferAlbedoMetallicRTV),
-		ResolveRTV(m_gBufferNormalRoughnessRTV),
-		ResolveRTV(m_gBufferWorldAoRTV),
-		ResolveRTV(m_gBufferEmissiveAlphaRTV)
+		m_gBufferAlbedoMetallicRTV.get(),
+		m_gBufferNormalRoughnessRTV.get(),
+		m_gBufferWorldAoRTV.get(),
+		m_gBufferEmissiveAlphaRTV.get()
 	};
 
 	const float clear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -462,7 +450,7 @@ DeferredRenderer::renderLightingPass(DeviceContext& deviceContext) {
 	};
 
 	deviceContext.PSSetShaderResources(0, 4, gBufferResources);
-	if (m_applyShadows && m_shadowDepthSRV.m_textureFromImg) {
+	if (m_applyShadows && m_hasShadowCastingLight && m_shadowDepthSRV.m_textureFromImg) {
 		deviceContext.PSSetShaderResources(6, 1, &m_shadowDepthSRV.m_textureFromImg);
 	}
 	else {
@@ -499,7 +487,7 @@ DeferredRenderer::renderSkyboxPass(DeviceContext& deviceContext, RenderScene& sc
 void
 DeferredRenderer::renderTransparentPass(DeviceContext& deviceContext) {
 	m_perFrameBuffer.render(deviceContext, 0, 1, true);
-	if (m_applyShadows && m_shadowDepthSRV.m_textureFromImg) {
+	if (m_applyShadows && m_hasShadowCastingLight && m_shadowDepthSRV.m_textureFromImg) {
 		deviceContext.PSSetShaderResources(6, 1, &m_shadowDepthSRV.m_textureFromImg);
 	}
 	else {
@@ -609,6 +597,9 @@ DeferredRenderer::renderShadowPass(DeviceContext& deviceContext) {
 	deviceContext.PSSetShaderResources(6, 1, nullShadowSRV);
 	deviceContext.OMSetRenderTargets(0, nullptr, m_shadowDSV.m_depthStencilView);
 	deviceContext.ClearDepthStencilView(m_shadowDSV.m_depthStencilView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+	if (!m_hasShadowCastingLight) {
+		return;
+	}
 
 	D3D11_VIEWPORT shadowViewport{};
 	shadowViewport.TopLeftX = 0.0f;
@@ -638,7 +629,7 @@ DeferredRenderer::renderShadowObject(DeviceContext& deviceContext, const RenderO
 	}
 
 	m_shadowShader.render(deviceContext);
-	deviceContext.m_deviceContext->PSSetShader(nullptr, nullptr, 0);
+	deviceContext.PSSetShader(nullptr, nullptr, 0);
 	deviceContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	std::vector<Submesh>& submeshes = object.mesh->getSubmeshes();
@@ -704,59 +695,72 @@ DeferredRenderer::createShadowResources(Device& device) {
 
 HRESULT
 DeferredRenderer::createGBufferResources(Device& device, unsigned int width, unsigned int height) {
-	m_gBufferEmissiveAlphaRTV.destroy();
-	m_gBufferEmissiveAlphaSRV.destroy();
-	m_gBufferEmissiveAlphaTexture.destroy();
-	m_gBufferWorldAoRTV.destroy();
-	m_gBufferWorldAoSRV.destroy();
-	m_gBufferWorldAoTexture.destroy();
-	m_gBufferNormalRoughnessRTV.destroy();
-	m_gBufferNormalRoughnessSRV.destroy();
-	m_gBufferNormalRoughnessTexture.destroy();
-	m_gBufferAlbedoMetallicRTV.destroy();
-	m_gBufferAlbedoMetallicSRV.destroy();
-	m_gBufferAlbedoMetallicTexture.destroy();
+	if (!device.m_device || width == 0 || height == 0) {
+		return E_INVALIDARG;
+	}
+
+	Texture albedoTexture;
+	Texture albedoSRV;
+	RenderTargetView albedoRTV;
+	Texture normalTexture;
+	Texture normalSRV;
+	RenderTargetView normalRTV;
+	Texture worldTexture;
+	Texture worldSRV;
+	RenderTargetView worldRTV;
+	Texture emissiveTexture;
+	Texture emissiveSRV;
+	RenderTargetView emissiveRTV;
 
 	HRESULT hr = createGBufferTarget(device,
 		width,
 		height,
 		DXGI_FORMAT_R8G8B8A8_UNORM,
-		m_gBufferAlbedoMetallicTexture,
-		m_gBufferAlbedoMetallicSRV,
-		m_gBufferAlbedoMetallicRTV);
-	if (FAILED(hr)) {
-		return hr;
-	}
+		albedoTexture,
+		albedoSRV,
+		albedoRTV);
+	if (FAILED(hr)) return hr;
 
 	hr = createGBufferTarget(device,
 		width,
 		height,
 		DXGI_FORMAT_R16G16B16A16_FLOAT,
-		m_gBufferNormalRoughnessTexture,
-		m_gBufferNormalRoughnessSRV,
-		m_gBufferNormalRoughnessRTV);
-	if (FAILED(hr)) {
-		return hr;
-	}
+		normalTexture,
+		normalSRV,
+		normalRTV);
+	if (FAILED(hr)) return hr;
 
 	hr = createGBufferTarget(device,
 		width,
 		height,
 		DXGI_FORMAT_R32G32B32A32_FLOAT,
-		m_gBufferWorldAoTexture,
-		m_gBufferWorldAoSRV,
-		m_gBufferWorldAoRTV);
-	if (FAILED(hr)) {
-		return hr;
-	}
+		worldTexture,
+		worldSRV,
+		worldRTV);
+	if (FAILED(hr)) return hr;
 
-	return createGBufferTarget(device,
+	hr = createGBufferTarget(device,
 		width,
 		height,
 		DXGI_FORMAT_R16G16B16A16_FLOAT,
-		m_gBufferEmissiveAlphaTexture,
-		m_gBufferEmissiveAlphaSRV,
-		m_gBufferEmissiveAlphaRTV);
+		emissiveTexture,
+		emissiveSRV,
+		emissiveRTV);
+	if (FAILED(hr)) return hr;
+
+	m_gBufferAlbedoMetallicTexture = std::move(albedoTexture);
+	m_gBufferAlbedoMetallicSRV = std::move(albedoSRV);
+	m_gBufferAlbedoMetallicRTV = std::move(albedoRTV);
+	m_gBufferNormalRoughnessTexture = std::move(normalTexture);
+	m_gBufferNormalRoughnessSRV = std::move(normalSRV);
+	m_gBufferNormalRoughnessRTV = std::move(normalRTV);
+	m_gBufferWorldAoTexture = std::move(worldTexture);
+	m_gBufferWorldAoSRV = std::move(worldSRV);
+	m_gBufferWorldAoRTV = std::move(worldRTV);
+	m_gBufferEmissiveAlphaTexture = std::move(emissiveTexture);
+	m_gBufferEmissiveAlphaSRV = std::move(emissiveSRV);
+	m_gBufferEmissiveAlphaRTV = std::move(emissiveRTV);
+	return S_OK;
 }
 
 HRESULT
@@ -843,6 +847,10 @@ DeferredRenderer::createFullScreenQuad(Device& device) {
 
 HRESULT
 DeferredRenderer::createBlendStates(Device& device) {
+	SAFE_RELEASE(m_alphaBlendState);
+	SAFE_RELEASE(m_opaqueBlendState);
+	SAFE_RELEASE(m_additiveBlendState);
+	SAFE_RELEASE(m_premultipliedBlendState);
 	if (!device.m_device) {
 		return E_POINTER;
 	}

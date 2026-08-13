@@ -10,7 +10,9 @@ class
 DeviceContext {
 public:
 	DeviceContext()  = default;
-	~DeviceContext() = default;
+	~DeviceContext() { destroy(); }
+	DeviceContext(const DeviceContext&) = delete;
+	DeviceContext& operator=(const DeviceContext&) = delete;
 
 	/**
    * @brief Inicializa el contexto del dispositivo.

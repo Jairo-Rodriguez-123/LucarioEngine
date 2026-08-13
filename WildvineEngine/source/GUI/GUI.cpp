@@ -3,20 +3,23 @@
  * @brief Implementa la logica de GUI dentro del subsistema GUI.
  * @ingroup gui
  */
-#include "EngineUtilities\GUI\GUI.h"
+#include "EngineUtilities/GUI/GUI.h"
 #include "Viewport.h"
 #include "Window.h"
 #include "Device.h"
 #include "DeviceContext.h"
+#include "Texture.h"
 #include "MeshComponent.h"
-#include "ECS\Actor.h"
-#include "ECS\LightComponent.h"
-#include "ECS\MeshRendererComponent.h"
-#include "Rendering\Mesh.h"
-#include "Rendering\Material.h"
-#include "Rendering\MaterialInstance.h"
-#include "EngineUtilities\Utilities\Camera.h"
-//#include "imgui_internal.h"
+#include "ECS/Actor.h"
+#include "ECS/LightComponent.h"
+#include "ECS/MeshRendererComponent.h"
+#include "Rendering/Mesh.h"
+#include "Rendering/Material.h"
+#include "Rendering/MaterialInstance.h"
+#include "EngineUtilities/Utilities/Camera.h"
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
 static ImGuizmo::OPERATION mCurrentGizmoOperation(ImGuizmo::TRANSLATE);
 static ImGuizmo::MODE mCurrentGizmoMode(ImGuizmo::LOCAL);
 
@@ -188,8 +191,73 @@ const char* GetBlendModeLabel(BlendMode blendMode) {
 	default: return "Unknown";
 	}
 }
+
+const char* GetMaterialTextureChannelLabel(MaterialTextureChannel channel) {
+	switch (channel) {
+	case MaterialTextureChannel::Albedo: return "Albedo";
+	case MaterialTextureChannel::Normal: return "Normal";
+	case MaterialTextureChannel::Metallic: return "Metallic";
+	case MaterialTextureChannel::Roughness: return "Roughness";
+	case MaterialTextureChannel::AO: return "Ambient Occlusion";
+	case MaterialTextureChannel::Emissive: return "Emissive";
+	default: return "Texture";
+	}
 }
-void 
+
+Texture* GetMaterialTexture(MaterialInstance* materialInstance, MaterialTextureChannel channel) {
+	if (!materialInstance) return nullptr;
+	switch (channel) {
+	case MaterialTextureChannel::Albedo: return materialInstance->getAlbedo();
+	case MaterialTextureChannel::Normal: return materialInstance->getNormal();
+	case MaterialTextureChannel::Metallic: return materialInstance->getMetallic();
+	case MaterialTextureChannel::Roughness: return materialInstance->getRoughness();
+	case MaterialTextureChannel::AO: return materialInstance->getAO();
+	case MaterialTextureChannel::Emissive: return materialInstance->getEmissive();
+	default: return nullptr;
+	}
+}
+
+std::string GetTextureDisplayName(const Texture* texture) {
+	if (!texture || texture->m_textureName.empty()) return "Built-in fallback";
+	const std::string& path = texture->m_textureName;
+	const size_t slash = path.find_last_of("/\\");
+	return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+const char* GetAssetBrowserTypeLabel(AssetBrowserItemType type) {
+	switch (type) {
+	case AssetBrowserItemType::ModelOBJ: return "OBJ";
+	case AssetBrowserItemType::Texture: return "Texture";
+	case AssetBrowserItemType::MaterialMTL: return "MTL";
+	default: return "Asset";
+	}
+}
+
+bool AssetBrowserTextMatches(const std::string& text, const char* search) {
+	if (!search || !search[0]) return true;
+	std::string haystack = text;
+	std::string needle = search;
+	std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	std::transform(needle.begin(), needle.end(), needle.begin(),
+		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return haystack.find(needle) != std::string::npos;
+}
+
+bool AssetMatchesCategory(const AssetBrowserItem& asset, int category) {
+	switch (category) {
+	case 1: return asset.type == AssetBrowserItemType::ModelOBJ;
+	case 2: return asset.type == AssetBrowserItemType::Texture;
+	case 3: return asset.type == AssetBrowserItemType::MaterialMTL;
+	default: return true;
+	}
+}
+}
+void
+GUI::awake() {
+}
+
+bool
 GUI::init(Window& window, Device& device, DeviceContext& deviceContext) {
 	// Setup Dear ImGui context
 	IMGUI_CHECKVERSION();
@@ -210,14 +278,28 @@ GUI::init(Window& window, Device& device, DeviceContext& deviceContext) {
 
 	appleLiquidStyle(0.72f, ImVec4(0.0f, 0.515f, 1.0f, 1.0f));
 
-	// Setup Platform/Renderer backends
-	ImGui_ImplWin32_Init(window.m_hWnd);
-	ImGui_ImplDX11_Init(device.m_device, deviceContext.m_deviceContext);
+	// Setup Platform/Renderer backends. Ambos devuelven false si el backend
+	// no puede asociarse a la ventana/dispositivo actuales.
+	if (!window.m_hWnd || !device.m_device || !deviceContext.m_deviceContext) {
+		ImGui::DestroyContext();
+		return false;
+	}
 
-	// Init ToolTips
+	if (!ImGui_ImplWin32_Init(window.m_hWnd)) {
+		ImGui::DestroyContext();
+		return false;
+	}
+
+	if (!ImGui_ImplDX11_Init(device.m_device, deviceContext.m_deviceContext)) {
+		ImGui_ImplWin32_Shutdown();
+		ImGui::DestroyContext();
+		return false;
+	}
+
+	// Inicializar datos de UI solo despues de que ambos backends esten listos.
 	toolTipData();
-
 	selectedActorIndex = 0;
+	return true;
 }
 
 void
@@ -229,8 +311,50 @@ GUI::update(Viewport& viewport, Window& window) {
 
 	ImGuizmo::BeginFrame();
 	ImGuiIO& io = ImGui::GetIO();
-	if (io.KeyCtrl && ImGui::IsKeyPressed('S', false)) {
-		m_requestSaveScene = true;
+#if defined(IMGUI_VERSION_NUM) && IMGUI_VERSION_NUM >= 18700
+	const bool savePressed = ImGui::IsKeyPressed(ImGuiKey_S, false);
+	const bool openPressed = ImGui::IsKeyPressed(ImGuiKey_O, false);
+	const bool newPressed = ImGui::IsKeyPressed(ImGuiKey_N, false);
+	const bool duplicatePressed = ImGui::IsKeyPressed(ImGuiKey_D, false);
+	const bool deletePressed = ImGui::IsKeyPressed(ImGuiKey_Delete, false);
+	const bool renamePressed = ImGui::IsKeyPressed(ImGuiKey_F2, false);
+#else
+	const bool savePressed = ImGui::IsKeyPressed('S', false);
+	const bool openPressed = ImGui::IsKeyPressed('O', false);
+	const bool newPressed = ImGui::IsKeyPressed('N', false);
+	const bool duplicatePressed = ImGui::IsKeyPressed('D', false);
+	const bool deletePressed = ImGui::IsKeyPressed(VK_DELETE, false);
+	const bool renamePressed = ImGui::IsKeyPressed(VK_F2, false);
+#endif
+
+	// Atajos de escena. Las acciones destructivas se difieren al siguiente frame,
+	// cuando los paneles de ImGui ya no conservan punteros al actor seleccionado.
+	if (!io.WantTextInput) {
+		if (io.KeyCtrl && savePressed) {
+			if (io.KeyShift) {
+				m_sceneEditorRequest = { true, SceneEditorAction::SaveSceneAs, -1, std::string() };
+			}
+			else {
+				m_requestSaveScene = true;
+			}
+		}
+		else if (io.KeyCtrl && openPressed) {
+			m_sceneEditorRequest = { true, SceneEditorAction::OpenScene, -1, std::string() };
+		}
+		else if (io.KeyCtrl && newPressed) {
+			m_sceneEditorRequest = { true, SceneEditorAction::NewScene, -1, std::string() };
+		}
+		else if (io.KeyCtrl && duplicatePressed && selectedActorIndex >= 0) {
+			m_sceneEditorRequest = { true, SceneEditorAction::DuplicateActor, selectedActorIndex, std::string() };
+		}
+		else if (deletePressed && selectedActorIndex >= 0) {
+			m_sceneEditorRequest = { true, SceneEditorAction::DeleteActor, selectedActorIndex, std::string() };
+		}
+		else if (renamePressed && selectedActorIndex >= 0) {
+			m_renameActorIndex = selectedActorIndex;
+			m_renameActorBuffer[0] = '\0';
+			m_openRenameActorPopup = true;
+		}
 	}
 	ImGuizmo::SetOrthographic(false);
 	//ImGuizmo::SetRect(0, 0, (float)window.m_width, (float)window.m_height);
@@ -265,8 +389,7 @@ GUI::destroy() {
 
 void 
 GUI::vec3Control(const std::string& label, float* values, float resetValue, float columnWidth, bool displayAsDegrees) {
-	ImGuiIO& io = ImGui::GetIO();
-	auto boldFont = io.Fonts->Fonts[0];
+	ImFont* boldFont = ImGui::GetFont();
 	float displayValues[3] = { values[0], values[1], values[2] };
 	if (displayAsDegrees) {
 		displayValues[0] = RadToDeg(values[0]);
@@ -291,7 +414,7 @@ GUI::vec3Control(const std::string& label, float* values, float resetValue, floa
 
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{ 3.0f, 4.0f });
 	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
-	float lineHeight = GImGui->Font->FontSize + GImGui->Style.FramePadding.y * 2.0f;
+	float lineHeight = ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2.0f;
 	ImVec2 buttonSize = { lineHeight, lineHeight };
 	const float spacing = ImGui::GetStyle().ItemSpacing.x;
 	const float availableWidth = ImGui::GetContentRegionAvail().x;
@@ -369,7 +492,7 @@ GUI::appleLiquidStyle(float opacity, ImVec4 accent) {
 	ImGuiStyle& style = ImGui::GetStyle();
 	ImVec4* colors = style.Colors;
 
-	// Geometría suave tipo macOS
+	// Geometrï¿½a suave tipo macOS
 	style.WindowRounding = 14.0f;
 	style.ChildRounding = 14.0f;
 	style.PopupRounding = 14.0f;
@@ -388,13 +511,13 @@ GUI::appleLiquidStyle(float opacity, ImVec4 accent) {
 	style.ItemSpacing = ImVec2(8, 8);
 	style.ItemInnerSpacing = ImVec2(8, 6);
 
-	const float o = opacity;                 // opacidad del “cristal”
+	const float o = opacity;                 // opacidad del ï¿½cristalï¿½
 	const ImVec4 txt = ImVec4(1, 1, 1, 0.95f);     // texto claro
-	const ImVec4 pane = ImVec4(0.16f, 0.16f, 0.18f, o); // panel “vidrioso” oscuro
+	const ImVec4 pane = ImVec4(0.16f, 0.16f, 0.18f, o); // panel ï¿½vidriosoï¿½ oscuro
 	const ImVec4 paneHi = ImVec4(0.20f, 0.20f, 0.22f, o);
 	const ImVec4 paneLo = ImVec4(0.13f, 0.13f, 0.15f, o * 0.85f);
 
-	// Colores base “glass”
+	// Colores base ï¿½glassï¿½
 	colors[ImGuiCol_Text] = txt;
 	colors[ImGuiCol_TextDisabled] = ImVec4(1, 1, 1, 0.45f);
 	colors[ImGuiCol_WindowBg] = pane;     // importante: con alpha
@@ -463,16 +586,16 @@ GUI::ToolBar() {
 	if (ImGui::BeginMainMenuBar()) {
 		if (ImGui::BeginMenu("File")) {
 			if (ImGui::MenuItem("New")) {
-				// Acción para "New"
+				// Acciï¿½n para "New"
 			}
 			if (ImGui::MenuItem("Open")) {
-				// Acción para "Open"
+				// Acciï¿½n para "Open"
 			}
 			if (ImGui::MenuItem("Save")) {
-				// Acción para "Save"
+				// Acciï¿½n para "Save"
 			}
 			if (ImGui::MenuItem("Exit")) {
-				// Acción para "Exit"
+				// Acciï¿½n para "Exit"
 				show_exit_popup = true;
 				ImGui::OpenPopup("Exit?");
 				//closeApp();
@@ -481,28 +604,28 @@ GUI::ToolBar() {
 		}
 		if (ImGui::BeginMenu("Edit")) {
 			if (ImGui::MenuItem("Undo")) {
-				// Acción para "Undo"
+				// Acciï¿½n para "Undo"
 			}
 			if (ImGui::MenuItem("Redo")) {
-				// Acción para "Redo"
+				// Acciï¿½n para "Redo"
 			}
 			if (ImGui::MenuItem("Cut")) {
-				// Acción para "Cut"
+				// Acciï¿½n para "Cut"
 			}
 			if (ImGui::MenuItem("Copy")) {
-				// Acción para "Copy"
+				// Acciï¿½n para "Copy"
 			}
 			if (ImGui::MenuItem("Paste")) {
-				// Acción para "Paste"
+				// Acciï¿½n para "Paste"
 			}
 			ImGui::EndMenu();
 		}
 		if (ImGui::BeginMenu("Tools")) {
 			if (ImGui::MenuItem("Options")) {
-				// Acción para "Options"
+				// Acciï¿½n para "Options"
 			}
 			if (ImGui::MenuItem("Settings")) {
-				// Acción para "Settings"
+				// Acciï¿½n para "Settings"
 			}
 			ImGui::EndMenu();
 		}
@@ -525,8 +648,10 @@ GUI::closeApp() {
 		ImGui::Separator();
 
 		if (ImGui::Button("OK", ImVec2(120, 0))) {
-			exit(0); // Salir de la aplicación
+			// Solicitar el cierre de la ventana permite que BaseApp::destroy()
+			// libere ImGui y los recursos D3D11 en el orden normal.
 			ImGui::CloseCurrentPopup();
+			PostQuitMessage(0);
 		}
 		ImGui::SetItemDefaultFocus();
 		ImGui::SameLine();
@@ -720,13 +845,21 @@ GUI::inspectorGeneral(EU::TSharedPointer<Actor> actor) {
 
 void
 GUI::inspectorContainer(EU::TSharedPointer<Actor> actor) {
-	//ImGui::Begin("Transform");
-	// Draw the structure
-	vec3Control("Position", const_cast<float*>(actor->getComponent<Transform>()->getPosition().data()), 0.0f, 78.0f, false);
-	vec3Control("Rotation", const_cast<float*>(actor->getComponent<Transform>()->getRotation().data()), 0.0f, 78.0f, true);
-	vec3Control("Scale", const_cast<float*>(actor->getComponent<Transform>()->getScale().data()), 1.0f, 78.0f, false);
+	if (actor.isNull()) return;
+	auto transform = actor->getComponent<Transform>();
+	if (transform.isNull()) return;
 
-	//ImGui::End();
+	EU::Vector3 position = transform->getPosition();
+	EU::Vector3 rotation = transform->getRotation();
+	EU::Vector3 scale = transform->getScale();
+
+	vec3Control("Position", position.data(), 0.0f, 78.0f, false);
+	vec3Control("Rotation", rotation.data(), 0.0f, 78.0f, true);
+	vec3Control("Scale", scale.data(), 1.0f, 78.0f, false);
+
+	transform->setPosition(position);
+	transform->setRotation(rotation);
+	transform->setScale(scale);
 }
 
 void 
@@ -734,6 +867,8 @@ GUI::outliner(const std::vector<EU::TSharedPointer<Actor>>& actors) {
 	ImGui::Begin("Hierarchy");
 
 	ImGui::TextDisabled("Scene");
+	ImGui::SameLine();
+	ImGui::TextDisabled("  F2 Rename   Ctrl+D Duplicate   Del Delete");
 	static ImGuiTextFilter filter;
 	filter.Draw("Search...", -1.0f);
 
@@ -767,8 +902,27 @@ GUI::outliner(const std::vector<EU::TSharedPointer<Actor>>& actors) {
 		}
 
 		ImVec2 rowSize(ImGui::GetContentRegionAvail().x, 42.0f);
-		if (ImGui::Selectable("##actorRow", isSelected, ImGuiSelectableFlags_SpanAvailWidth, rowSize)) {
+		if (ImGui::Selectable("##actorRow", isSelected, ImGuiSelectableFlags_None, rowSize)) {
 			selectedActorIndex = i;
+		}
+
+		// Menu contextual por actor. Las acciones se ejecutan de forma diferida
+		// en BaseApp para no invalidar punteros que ImGui usa durante este frame.
+		if (ImGui::BeginPopupContextItem("ActorContext")) {
+			selectedActorIndex = i;
+			if (ImGui::MenuItem("Rename", "F2")) {
+				m_renameActorIndex = i;
+				std::snprintf(m_renameActorBuffer, sizeof(m_renameActorBuffer), "%s", actorName.c_str());
+				m_openRenameActorPopup = true;
+			}
+			if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
+				m_sceneEditorRequest = { true, SceneEditorAction::DuplicateActor, i, std::string() };
+			}
+			ImGui::Separator();
+			if (ImGui::MenuItem("Delete", "Delete")) {
+				m_sceneEditorRequest = { true, SceneEditorAction::DeleteActor, i, std::string() };
+			}
+			ImGui::EndPopup();
 		}
 
 		ImVec2 min = ImGui::GetItemRectMin();
@@ -794,6 +948,39 @@ GUI::outliner(const std::vector<EU::TSharedPointer<Actor>>& actors) {
 		ImGui::PopID();
 	}
 
+	// El popup de rename vive fuera del row context popup para que no quede
+	// anidado en una ventana que desaparece cuando cambia el filtro/seleccion.
+	if (m_openRenameActorPopup && m_renameActorIndex >= 0 &&
+		m_renameActorIndex < static_cast<int>(actors.size())) {
+		if (m_renameActorBuffer[0] == '\0' && !actors[m_renameActorIndex].isNull()) {
+			std::snprintf(m_renameActorBuffer, sizeof(m_renameActorBuffer), "%s",
+				actors[m_renameActorIndex]->getName().c_str());
+		}
+		ImGui::OpenPopup("Rename Actor");
+		m_openRenameActorPopup = false;
+	}
+
+	if (ImGui::BeginPopupModal("Rename Actor", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		ImGui::TextUnformatted("Actor name");
+		ImGui::SetNextItemWidth(320.0f);
+		const bool submitted = ImGui::InputText("##ActorName", m_renameActorBuffer,
+			sizeof(m_renameActorBuffer), ImGuiInputTextFlags_EnterReturnsTrue);
+		const bool canRename = m_renameActorIndex >= 0 &&
+			m_renameActorIndex < static_cast<int>(actors.size()) &&
+			m_renameActorBuffer[0] != '\0';
+
+		if ((submitted || ImGui::Button("Rename")) && canRename) {
+			m_sceneEditorRequest = { true, SceneEditorAction::RenameActor,
+				m_renameActorIndex, std::string(m_renameActorBuffer) };
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel")) {
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+
 	ImGui::End();
 }
 
@@ -814,13 +1001,15 @@ void GUI::editTransform(Camera& cam, Window& window, EU::TSharedPointer<Actor> a
 		return;
 	}
 
-	float* pos = const_cast<float*>(transform->getPosition().data());
-	float* rot = const_cast<float*>(transform->getRotation().data());
-	float* sca = const_cast<float*>(transform->getScale().data());
+	const EU::Vector3 currentPosition = transform->getPosition();
+	const EU::Vector3 currentRotation = transform->getRotation();
+	const EU::Vector3 currentScale = transform->getScale();
+	float pos[3] = { currentPosition.x, currentPosition.y, currentPosition.z };
+	float sca[3] = { currentScale.x, currentScale.y, currentScale.z };
 	float gizmoRotation[3] = {
-		RadToDeg(rot[0]),
-		RadToDeg(rot[1]),
-		RadToDeg(rot[2])
+		RadToDeg(currentRotation.x),
+		RadToDeg(currentRotation.y),
+		RadToDeg(currentRotation.z)
 	};
 
 	float mArr[16];
@@ -916,17 +1105,17 @@ void GUI::drawGizmoToolbar()
 
 		const bool worldLocalSupported = (mCurrentGizmoOperation != ImGuizmo::SCALE);
 		if (!worldLocalSupported) {
-			ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
 			ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
 		}
-		if (ImGui::Button(mCurrentGizmoMode == ImGuizmo::WORLD ? "Global" : "Local"))
+		const bool toggleWorldLocal = ImGui::Button(mCurrentGizmoMode == ImGuizmo::WORLD ? "Global" : "Local");
+		if (worldLocalSupported && toggleWorldLocal) {
 			mCurrentGizmoMode = (mCurrentGizmoMode == ImGuizmo::WORLD) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
+		}
 		if (!worldLocalSupported) {
-			ImGui::PopStyleVar();
-			ImGui::PopItemFlag();
 			if (ImGui::IsItemHovered()) {
 				ImGui::SetTooltip("Scale uses local orientation. World/Local affects Move and Rotate.");
 			}
+			ImGui::PopStyleVar();
 		}
 	}
 	ImGui::End();
@@ -969,11 +1158,17 @@ void GUI::drawStudioTopRibbon()
 		{
 			if (ImGui::BeginMenu("File"))
 			{
-				ImGui::MenuItem("New Place");
-				ImGui::MenuItem("Open Place");
-				if (ImGui::MenuItem("Save", "Ctrl+S"))
-				{
+				if (ImGui::MenuItem("New Scene", "Ctrl+N")) {
+					m_sceneEditorRequest = { true, SceneEditorAction::NewScene, -1, std::string() };
+				}
+				if (ImGui::MenuItem("Open Scene...", "Ctrl+O")) {
+					m_sceneEditorRequest = { true, SceneEditorAction::OpenScene, -1, std::string() };
+				}
+				if (ImGui::MenuItem("Save", "Ctrl+S")) {
 					m_requestSaveScene = true;
+				}
+				if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S")) {
+					m_sceneEditorRequest = { true, SceneEditorAction::SaveSceneAs, -1, std::string() };
 				}
 				ImGui::Separator();
 				if (ImGui::MenuItem("Exit"))
@@ -985,12 +1180,21 @@ void GUI::drawStudioTopRibbon()
 
 			if (ImGui::BeginMenu("Edit"))
 			{
-				ImGui::MenuItem("Undo");
-				ImGui::MenuItem("Redo");
+				ImGui::MenuItem("Undo", nullptr, false, false);
+				ImGui::MenuItem("Redo", nullptr, false, false);
 				ImGui::Separator();
-				ImGui::MenuItem("Cut");
-				ImGui::MenuItem("Copy");
-				ImGui::MenuItem("Paste");
+				const bool hasSelection = selectedActorIndex >= 0;
+				if (ImGui::MenuItem("Rename Actor", "F2", false, hasSelection)) {
+					m_renameActorIndex = selectedActorIndex;
+					m_renameActorBuffer[0] = '\0';
+					m_openRenameActorPopup = true;
+				}
+				if (ImGui::MenuItem("Duplicate Actor", "Ctrl+D", false, hasSelection)) {
+					m_sceneEditorRequest = { true, SceneEditorAction::DuplicateActor, selectedActorIndex, std::string() };
+				}
+				if (ImGui::MenuItem("Delete Actor", "Delete", false, hasSelection)) {
+					m_sceneEditorRequest = { true, SceneEditorAction::DeleteActor, selectedActorIndex, std::string() };
+				}
 				ImGui::EndMenu();
 			}
 
@@ -1153,7 +1357,13 @@ void GUI::drawStudioTopRibbon()
 		// Creacion / escena
 		if (ribbonButton("##Part", "Part", "Mesh", btnSize, false))
 		{
-			// crear parte
+			m_requestImportMesh = true;
+		}
+		ImGui::SameLine();
+
+		if (ribbonButton("##Light", "Light", "Create", btnSize, false))
+		{
+			m_requestCreateLightActor = true;
 		}
 		ImGui::SameLine();
 
@@ -1163,9 +1373,9 @@ void GUI::drawStudioTopRibbon()
 		}
 		ImGui::SameLine();
 
-		if (ribbonButton("##Material", "Material", "Editor", btnSize, false))
+		if (ribbonButton("##Material", "Material", "Editor", btnSize, m_showMaterialEditor))
 		{
-			// material editor
+			m_showMaterialEditor = true;
 		}
 		ImGui::SameLine();
 
@@ -1189,9 +1399,9 @@ void GUI::drawStudioTopRibbon()
 		}
 		ImGui::SameLine();
 
-		if (ribbonButton("##Toolbox", "Toolbox", "Assets", btnSize, false))
+		if (ribbonButton("##Toolbox", "Toolbox", "Assets", btnSize, m_showAssetBrowser))
 		{
-			// toggle toolbox
+			m_showAssetBrowser = !m_showAssetBrowser;
 		}
 	}
 	ImGui::End();
@@ -1200,8 +1410,369 @@ void GUI::drawStudioTopRibbon()
 	ImGui::PopStyleVar(3);
 }
 
-void GUI::drawViewportPanel(ID3D11ShaderResourceView* viewportSRV)
+
+void
+GUI::drawMaterialEditor(EU::TSharedPointer<Actor> actor) {
+	if (!m_showMaterialEditor) {
+		return;
+	}
+
+	ImGui::SetNextWindowSize(ImVec2(560.0f, 680.0f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Material Editor", &m_showMaterialEditor)) {
+		ImGui::End();
+		return;
+	}
+
+	if (actor.isNull()) {
+		ImGui::TextDisabled("No actor selected");
+		ImGui::TextWrapped("Select a Static Mesh Actor in the Hierarchy to edit its PBR material.");
+		ImGui::End();
+		return;
+	}
+
+	auto meshRenderer = actor->getComponent<MeshRendererComponent>();
+	if (meshRenderer.isNull()) {
+		ImGui::Text("%s", actor->getName().c_str());
+		ImGui::Separator();
+		ImGui::TextDisabled("The selected actor does not have a MeshRendererComponent.");
+		ImGui::End();
+		return;
+	}
+
+	const std::vector<MaterialInstance*>& materialInstances = meshRenderer->getMaterialInstances();
+	if (materialInstances.empty()) {
+		ImGui::Text("%s", actor->getName().c_str());
+		ImGui::Separator();
+		ImGui::TextDisabled("The selected mesh does not contain material slots.");
+		ImGui::End();
+		return;
+	}
+
+	if (m_materialEditorSlot < 0) m_materialEditorSlot = 0;
+	if (m_materialEditorSlot >= static_cast<int>(materialInstances.size())) {
+		m_materialEditorSlot = static_cast<int>(materialInstances.size()) - 1;
+	}
+
+	ImGui::Text("Actor: %s", actor->getName().c_str());
+	ImGui::TextDisabled("PBR material parameters and texture maps");
+	ImGui::Separator();
+
+	if (materialInstances.size() > 1) {
+		ImGui::SetNextItemWidth(180.0f);
+		ImGui::SliderInt("Material Slot", &m_materialEditorSlot, 0, static_cast<int>(materialInstances.size()) - 1);
+	}
+	else {
+		ImGui::TextDisabled("Material Slot 0");
+	}
+
+	MaterialInstance* materialInstance = materialInstances[static_cast<size_t>(m_materialEditorSlot)];
+	if (!materialInstance) {
+		ImGui::TextDisabled("Invalid material instance.");
+		ImGui::End();
+		return;
+	}
+
+	Material* material = materialInstance->getMaterial();
+	MaterialParams& params = materialInstance->getParams();
+
+	ImGui::Spacing();
+	ImGui::TextUnformatted("Material Properties");
+	ImGui::Separator();
+	if (material) {
+		static const char* kMaterialDomains[] = { "Opaque", "Masked", "Transparent" };
+		int domain = static_cast<int>(material->getDomain());
+		ImGui::SetNextItemWidth(220.0f);
+		if (ImGui::Combo("Domain", &domain, kMaterialDomains, IM_ARRAYSIZE(kMaterialDomains))) {
+			material->setDomain(static_cast<MaterialDomain>(domain));
+		}
+
+		if (material->getDomain() == MaterialDomain::Transparent) {
+			static const char* kBlendModes[] = { "Opaque", "Alpha", "Additive", "Premultiplied" };
+			int blend = static_cast<int>(material->getBlendMode());
+			ImGui::SetNextItemWidth(220.0f);
+			if (ImGui::Combo("Blend Mode", &blend, kBlendModes, IM_ARRAYSIZE(kBlendModes))) {
+				material->setBlendMode(static_cast<BlendMode>(blend));
+			}
+		}
+	}
+
+	ImGui::ColorEdit4("Base Color", &params.baseColor.x);
+	ImGui::SliderFloat("Metallic", &params.metallic, 0.0f, 1.0f, "%.3f");
+	ImGui::SliderFloat("Roughness", &params.roughness, 0.0f, 1.0f, "%.3f");
+	ImGui::SliderFloat("Ambient Occlusion", &params.ao, 0.0f, 1.0f, "%.3f");
+	ImGui::SliderFloat("Normal Intensity", &params.normalScale, 0.0f, 4.0f, "%.2f");
+	ImGui::SliderFloat("Emissive Strength", &params.emissiveStrength, 0.0f, 16.0f, "%.2f");
+	if (material && material->getDomain() == MaterialDomain::Masked) {
+		ImGui::SliderFloat("Alpha Cutoff", &params.alphaCutoff, 0.0f, 1.0f, "%.3f");
+	}
+
+	if (ImGui::Button("Reset PBR Values")) {
+		params.baseColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+		params.metallic = 0.0f;
+		params.roughness = 0.55f;
+		params.ao = 1.0f;
+		params.normalScale = 1.0f;
+		params.emissiveStrength = 0.0f;
+		params.alphaCutoff = 0.5f;
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Save Scene  Ctrl+S")) {
+		m_requestSaveScene = true;
+	}
+
+	ImGui::Spacing();
+	ImGui::TextUnformatted("Texture Maps");
+	ImGui::Separator();
+	ImGui::TextDisabled("Replace copies the selected image into Assets/Textures/MaterialOverrides.");
+
+	const MaterialTextureChannel channels[] = {
+		MaterialTextureChannel::Albedo,
+		MaterialTextureChannel::Normal,
+		MaterialTextureChannel::Metallic,
+		MaterialTextureChannel::Roughness,
+		MaterialTextureChannel::AO,
+		MaterialTextureChannel::Emissive
+	};
+
+	if (ImGui::BeginTable("##MaterialTextureGrid", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
+		for (int channelIndex = 0; channelIndex < IM_ARRAYSIZE(channels); ++channelIndex) {
+			const MaterialTextureChannel channel = channels[channelIndex];
+			Texture* texture = GetMaterialTexture(materialInstance, channel);
+			ImGui::TableNextColumn();
+			ImGui::PushID(channelIndex);
+			ImGui::BeginChild("##TextureCard", ImVec2(0.0f, 154.0f), true);
+			ImGui::TextUnformatted(GetMaterialTextureChannelLabel(channel));
+			ImGui::Separator();
+			if (texture && texture->m_textureFromImg) {
+				ImGui::Image((ImTextureID)texture->m_textureFromImg, ImVec2(64.0f, 64.0f));
+			}
+			else {
+				ImGui::Dummy(ImVec2(64.0f, 64.0f));
+			}
+			ImGui::SameLine();
+			ImGui::BeginGroup();
+			const std::string textureName = GetTextureDisplayName(texture);
+			ImGui::TextWrapped("%s", textureName.c_str());
+			if (ImGui::Button("Replace...")) {
+				m_materialTextureRequest.pending = true;
+				m_materialTextureRequest.clear = false;
+				m_materialTextureRequest.materialSlot = static_cast<size_t>(m_materialEditorSlot);
+				m_materialTextureRequest.channel = channel;
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Reset")) {
+				m_materialTextureRequest.pending = true;
+				m_materialTextureRequest.clear = true;
+				m_materialTextureRequest.materialSlot = static_cast<size_t>(m_materialEditorSlot);
+				m_materialTextureRequest.channel = channel;
+			}
+			ImGui::EndGroup();
+			ImGui::EndChild();
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+	ImGui::TextDisabled("Texture replacements and material values are persisted when the scene is saved.");
+	ImGui::End();
+}
+
+
+void GUI::drawAssetBrowser(const std::vector<AssetBrowserItem>& assets,
+	EU::TSharedPointer<Actor> selectedActor)
 {
+	if (!m_showAssetBrowser) {
+		return;
+	}
+
+	ImGui::SetNextWindowSize(ImVec2(760.0f, 560.0f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Asset Browser", &m_showAssetBrowser)) {
+		ImGui::End();
+		return;
+	}
+
+	if (ImGui::Button("Refresh")) {
+		m_assetBrowserRequest.pending = true;
+		m_assetBrowserRequest.action = AssetBrowserAction::Refresh;
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Open Assets Folder")) {
+		m_assetBrowserRequest.pending = true;
+		m_assetBrowserRequest.action = AssetBrowserAction::OpenAssetsFolder;
+	}
+
+	ImGui::SameLine();
+	ImGui::TextDisabled("%d assets", static_cast<int>(assets.size()));
+
+	ImGui::SetNextItemWidth(260.0f);
+	ImGui::InputText("Search", m_assetBrowserSearch, IM_ARRAYSIZE(m_assetBrowserSearch));
+	ImGui::SameLine();
+	static const char* kCategories[] = { "All", "Models", "Textures", "Materials" };
+	ImGui::SetNextItemWidth(140.0f);
+	ImGui::Combo("##AssetCategory", &m_assetBrowserCategory, kCategories, IM_ARRAYSIZE(kCategories));
+
+	ImGui::Separator();
+
+	const float detailsHeight = 150.0f;
+	ImVec2 available = ImGui::GetContentRegionAvail();
+	const float browserHeight = (available.y > detailsHeight + 80.0f) ? (available.y - detailsHeight) : 180.0f;
+
+	if (ImGui::BeginChild("##AssetGridRegion", ImVec2(0.0f, browserHeight), true)) {
+		const float cardWidth = 130.0f;
+		const int columns = std::max(1, static_cast<int>(ImGui::GetContentRegionAvail().x / cardWidth));
+		if (ImGui::BeginTable("##AssetGrid", columns, ImGuiTableFlags_SizingFixedFit)) {
+			for (size_t index = 0; index < assets.size(); ++index) {
+				const AssetBrowserItem& asset = assets[index];
+				if (!AssetMatchesCategory(asset, m_assetBrowserCategory)) continue;
+				if (!AssetBrowserTextMatches(asset.name, m_assetBrowserSearch) &&
+					!AssetBrowserTextMatches(asset.relativePath, m_assetBrowserSearch)) {
+					continue;
+				}
+
+				ImGui::TableNextColumn();
+				ImGui::PushID(static_cast<int>(index));
+				const bool selected = (m_assetBrowserSelectedIndex == static_cast<int>(index));
+
+				if (selected) {
+					ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.22f, 0.36f, 0.92f));
+				}
+				ImGui::BeginChild("##AssetCard", ImVec2(120.0f, 126.0f), true);
+				if (selected) {
+					ImGui::PopStyleColor();
+				}
+
+				const ImVec2 previewSize(76.0f, 76.0f);
+				if (asset.type == AssetBrowserItemType::Texture && asset.previewSRV) {
+					ImGui::Image((ImTextureID)asset.previewSRV, previewSize);
+				}
+				else {
+					ImVec2 p = ImGui::GetCursorScreenPos();
+					ImGui::InvisibleButton("##AssetPreview", previewSize);
+					ImDrawList* draw = ImGui::GetWindowDrawList();
+					const ImU32 background = asset.type == AssetBrowserItemType::ModelOBJ
+						? IM_COL32(54, 94, 150, 255)
+						: IM_COL32(112, 82, 45, 255);
+					draw->AddRectFilled(p, ImVec2(p.x + previewSize.x, p.y + previewSize.y), background, 8.0f);
+					const char* typeLabel = GetAssetBrowserTypeLabel(asset.type);
+					const ImVec2 textSize = ImGui::CalcTextSize(typeLabel);
+					draw->AddText(ImVec2(p.x + (previewSize.x - textSize.x) * 0.5f,
+						p.y + (previewSize.y - textSize.y) * 0.5f),
+						IM_COL32(240, 240, 245, 255), typeLabel);
+				}
+
+				const bool previewHovered = ImGui::IsItemHovered();
+				if (previewHovered && ImGui::IsMouseClicked(0)) {
+					m_assetBrowserSelectedIndex = static_cast<int>(index);
+				}
+				if (previewHovered && ImGui::IsMouseDoubleClicked(0) &&
+					asset.type == AssetBrowserItemType::ModelOBJ) {
+					m_assetBrowserRequest.pending = true;
+					m_assetBrowserRequest.action = AssetBrowserAction::ImportOBJ;
+					m_assetBrowserRequest.path = asset.relativePath;
+				}
+
+				if (asset.type == AssetBrowserItemType::ModelOBJ && ImGui::BeginDragDropSource()) {
+					ImGui::SetDragDropPayload("WV_ASSET_OBJ",
+						asset.relativePath.c_str(),
+						asset.relativePath.size() + 1);
+					ImGui::TextUnformatted("Import OBJ");
+					ImGui::TextDisabled("%s", asset.name.c_str());
+					ImGui::EndDragDropSource();
+				}
+
+				ImGui::TextWrapped("%s", asset.name.c_str());
+				ImGui::EndChild();
+
+				if (ImGui::IsItemClicked()) {
+					m_assetBrowserSelectedIndex = static_cast<int>(index);
+				}
+				ImGui::PopID();
+			}
+			ImGui::EndTable();
+		}
+	}
+	ImGui::EndChild();
+
+	ImGui::Separator();
+	if (m_assetBrowserSelectedIndex < 0 ||
+		m_assetBrowserSelectedIndex >= static_cast<int>(assets.size())) {
+		ImGui::TextDisabled("Select an asset. Double-click an OBJ to import it, or drag it into the Viewport.");
+		ImGui::End();
+		return;
+	}
+
+	const AssetBrowserItem& selectedAsset = assets[static_cast<size_t>(m_assetBrowserSelectedIndex)];
+	ImGui::Text("%s", selectedAsset.name.c_str());
+	ImGui::TextDisabled("%s  |  %s",
+		GetAssetBrowserTypeLabel(selectedAsset.type),
+		selectedAsset.relativePath.c_str());
+
+	if (selectedAsset.type == AssetBrowserItemType::ModelOBJ) {
+		if (ImGui::Button("Import Model")) {
+			m_assetBrowserRequest.pending = true;
+			m_assetBrowserRequest.action = AssetBrowserAction::ImportOBJ;
+			m_assetBrowserRequest.path = selectedAsset.relativePath;
+		}
+		ImGui::SameLine();
+		ImGui::TextDisabled("You can also double-click or drag this OBJ into the Viewport.");
+	}
+	else if (selectedAsset.type == AssetBrowserItemType::Texture) {
+		auto meshRenderer = selectedActor.isNull()
+			? EU::TSharedPointer<MeshRendererComponent>()
+			: selectedActor->getComponent<MeshRendererComponent>();
+
+		if (meshRenderer.isNull() || meshRenderer->getMaterialInstances().empty()) {
+			ImGui::TextDisabled("Select a Static Mesh Actor to apply this texture.");
+		}
+		else {
+			const std::vector<MaterialInstance*>& materials = meshRenderer->getMaterialInstances();
+			if (m_assetBrowserMaterialSlot < 0) m_assetBrowserMaterialSlot = 0;
+			if (m_assetBrowserMaterialSlot >= static_cast<int>(materials.size())) {
+				m_assetBrowserMaterialSlot = static_cast<int>(materials.size()) - 1;
+			}
+
+			if (materials.size() > 1) {
+				ImGui::SetNextItemWidth(140.0f);
+				ImGui::SliderInt("Material Slot", &m_assetBrowserMaterialSlot, 0, static_cast<int>(materials.size()) - 1);
+			}
+			else {
+				ImGui::TextDisabled("Material Slot 0");
+			}
+
+			static const char* kTextureChannels[] = {
+				"Albedo", "Normal", "Metallic", "Roughness", "AO", "Emissive"
+			};
+			ImGui::SetNextItemWidth(170.0f);
+			ImGui::Combo("Texture Channel", &m_assetBrowserTextureChannel,
+				kTextureChannels, IM_ARRAYSIZE(kTextureChannels));
+
+			if (ImGui::Button("Apply To Selected Material")) {
+				m_assetBrowserRequest.pending = true;
+				m_assetBrowserRequest.action = AssetBrowserAction::ApplyTexture;
+				m_assetBrowserRequest.path = selectedAsset.relativePath;
+				m_assetBrowserRequest.materialSlot = static_cast<size_t>(m_assetBrowserMaterialSlot);
+				m_assetBrowserRequest.channel =
+					static_cast<MaterialTextureChannel>(m_assetBrowserTextureChannel);
+			}
+		}
+	}
+	else {
+		ImGui::TextDisabled("MTL files are consumed automatically by their OBJ models.");
+	}
+
+	ImGui::End();
+}
+
+void GUI::drawViewportPanel(ID3D11ShaderResourceView* viewportSRV,
+	const std::vector<EU::TSharedPointer<Actor>>& actors,
+	Camera& camera,
+	Window& window,
+	EU::TSharedPointer<Actor> selectedActor,
+	ID3D11ShaderResourceView* lightIconSRV)
+{
+	(void)actors;
+	(void)lightIconSRV;
 	ImGuiWindowFlags flags =
 		ImGuiWindowFlags_NoScrollbar |
 		ImGuiWindowFlags_NoScrollWithMouse | 
@@ -1239,6 +1810,18 @@ void GUI::drawViewportPanel(ID3D11ShaderResourceView* viewportSRV)
 			);
 		}
 
+		if (ImGui::BeginDragDropTarget()) {
+			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("WV_ASSET_OBJ")) {
+				const char* droppedPath = static_cast<const char*>(payload->Data);
+				if (droppedPath && droppedPath[0] != '\0') {
+					m_assetBrowserRequest.pending = true;
+					m_assetBrowserRequest.action = AssetBrowserAction::ImportOBJ;
+					m_assetBrowserRequest.path = droppedPath;
+				}
+			}
+			ImGui::EndDragDropTarget();
+		}
+
 		ImVec2 itemMin = ImGui::GetItemRectMin();
 		ImVec2 itemMax = ImGui::GetItemRectMax();
 		m_viewportPos = itemMin;
@@ -1250,6 +1833,10 @@ void GUI::drawViewportPanel(ID3D11ShaderResourceView* viewportSRV)
 		m_viewportFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 	}
 	ImGui::End();
+
+	if (!selectedActor.isNull() && m_viewportFocused) {
+		editTransform(camera, window, selectedActor);
+	}
 
 	ImGui::PopStyleVar();
 }
@@ -1312,6 +1899,42 @@ void GUI::drawRenderDebugPanel(ID3D11ShaderResourceView* preShadowSRV,
 		ImGui::TextDisabled("No texture bound for this view");
 	}
 
+	ImGui::End();
+}
+
+void GUI::drawGBufferDebugPanel(ID3D11ShaderResourceView* albedoMetallicSRV,
+	ID3D11ShaderResourceView* normalRoughnessSRV,
+	ID3D11ShaderResourceView* worldAoSRV,
+	ID3D11ShaderResourceView* emissiveAlphaSRV,
+	EU::TSharedPointer<Actor> selectedActor)
+{
+	(void)selectedActor;
+	if (!ImGui::Begin("GBuffer Debug")) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::Checkbox("Visualize shadow factor", &m_visualizeDeferredShadowFactor);
+	const char* debugModes[] = { "Lit", "Shadow factor", "Albedo/Metallic", "Normal/Roughness", "World/AO", "Emissive/Alpha" };
+	if (m_deferredDebugViewMode < 0 || m_deferredDebugViewMode >= IM_ARRAYSIZE(debugModes))
+		m_deferredDebugViewMode = 0;
+	ImGui::Combo("Lighting debug", &m_deferredDebugViewMode, debugModes, IM_ARRAYSIZE(debugModes));
+	ImGui::Separator();
+
+	struct GBufferItem { const char* label; ID3D11ShaderResourceView* srv; };
+	GBufferItem items[] = {
+		{ "Albedo / Metallic", albedoMetallicSRV },
+		{ "Normal / Roughness", normalRoughnessSRV },
+		{ "World / AO", worldAoSRV },
+		{ "Emissive / Alpha", emissiveAlphaSRV }
+	};
+	const ImVec2 previewSize(220.0f, 124.0f);
+	for (int i = 0; i < IM_ARRAYSIZE(items); ++i) {
+		ImGui::TextUnformatted(items[i].label);
+		if (items[i].srv) ImGui::Image((ImTextureID)items[i].srv, previewSize);
+		else ImGui::Dummy(previewSize);
+		if (i + 1 < IM_ARRAYSIZE(items)) ImGui::Separator();
+	}
 	ImGui::End();
 }
 

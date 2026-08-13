@@ -65,8 +65,8 @@ protected:
 private:
 	static uint64_t GenerateID()
 	{
-		static uint64_t nextID = 1;
-		return nextID++;
+		static std::atomic<uint64_t> nextID{ 1 };
+		return nextID.fetch_add(1, std::memory_order_relaxed);
 	}
 };
 

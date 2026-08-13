@@ -21,7 +21,9 @@ class
 Device {
 public:
 	Device()  = default;
-	~Device() = default;
+	~Device() { destroy(); }
+	Device(const Device&) = delete;
+	Device& operator=(const Device&) = delete;
 
 	void 
 	init();

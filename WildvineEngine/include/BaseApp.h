@@ -19,11 +19,11 @@
 #include "SamplerState.h"
 #include "Model3D.h"
 #include "ECS/Actor.h"
-#include "EngineUtilities\GUI/GUI.h"
-#include "SceneGraph\SceneGraph.h"
-#include "EngineUtilities\Utilities\Camera.h"
-#include "EngineUtilities\Utilities\Skybox.h"
-#include "EngineUtilities\Utilities\LayoutBuilder.h"
+#include "EngineUtilities/GUI/GUI.h"
+#include "SceneGraph/SceneGraph.h"
+#include "EngineUtilities/Utilities/Camera.h"
+#include "EngineUtilities/Utilities/Skybox.h"
+#include "EngineUtilities/Utilities/LayoutBuilder.h"
 #include "EngineUtilities/Utilities/EditorViewportPass.h"
 #include "ECS/LightComponent.h"
 #include "ECS/MeshRendererComponent.h"
@@ -124,7 +124,63 @@ public:
 	 */
 	std::string getDefaultScenePath() const;
 private:
+	enum class BuiltinMeshKind {
+		None = 0,
+		Cube = 1,
+		Pyramid = 2,
+		Floor = 3
+	};
+
+	struct ImportedMeshAsset {
+		std::unique_ptr<Model3D> model;
+		std::unique_ptr<Mesh> renderMesh;
+		std::vector<std::unique_ptr<Material>> materialResources;
+		std::vector<std::unique_ptr<MaterialInstance>> materials;
+		std::vector<std::unique_ptr<Texture>> textures;
+		EU::TSharedPointer<Actor> actor;
+		std::string sourcePath;
+		BuiltinMeshKind builtinKind = BuiltinMeshKind::None;
+	};
+
+	struct MaterialTextureOverride {
+		Actor* actor = nullptr;
+		size_t materialSlot = 0;
+		MaterialTextureChannel channel = MaterialTextureChannel::Albedo;
+		std::unique_ptr<Texture> texture;
+		Texture* originalTexture = nullptr;
+		std::string sourcePath;
+	};
+
 	EU::TSharedPointer<Actor> createLightActor(const std::string& name = std::string());
+	bool importOBJFromDialog();
+	bool importOBJModel(const std::string& path);
+	bool attachOBJAssetToActor(const std::string& path, const EU::TSharedPointer<Actor>& actor, bool autoPlace);
+	bool tryRestoreLegacyOBJActor(const EU::TSharedPointer<Actor>& actor);
+	const ImportedMeshAsset* findImportedMeshAsset(const Actor* actor) const;
+	void handlePendingMaterialTextureEdit();
+	void handlePendingAssetBrowserAction();
+	void updateAssetBrowserCatalog(float deltaTime);
+	bool refreshAssetBrowserCatalog(bool force = false);
+	bool applyMaterialTextureOverride(const EU::TSharedPointer<Actor>& actor, size_t materialSlot, MaterialTextureChannel channel, const std::string& path);
+	bool clearMaterialTextureOverride(const EU::TSharedPointer<Actor>& actor, size_t materialSlot, MaterialTextureChannel channel);
+	MaterialTextureOverride* findMaterialTextureOverride(const Actor* actor, size_t materialSlot, MaterialTextureChannel channel);
+	const MaterialTextureOverride* findMaterialTextureOverride(const Actor* actor, size_t materialSlot, MaterialTextureChannel channel) const;
+
+	void handlePendingSceneEditorAction();
+	bool openSceneFromDialog();
+	bool saveSceneAsFromDialog();
+	void createNewScene();
+	void clearCurrentSceneActors();
+	bool duplicateActorAtIndex(int actorIndex);
+	bool deleteActorAtIndex(int actorIndex);
+	bool renameActorAtIndex(int actorIndex, const std::string& newName);
+	std::string makeUniqueActorName(const std::string& desiredName, const Actor* ignoreActor = nullptr) const;
+	bool attachBuiltinMeshToActor(BuiltinMeshKind kind, const EU::TSharedPointer<Actor>& actor);
+	bool tryRestoreLegacyBuiltinActor(const EU::TSharedPointer<Actor>& actor);
+	void registerBuiltinActorMetadata(const EU::TSharedPointer<Actor>& actor, BuiltinMeshKind kind);
+	void removeActorOwnedResources(const Actor* actor);
+	void copyActorEditableState(const EU::TSharedPointer<Actor>& source, const EU::TSharedPointer<Actor>& destination);
+	bool isValidSceneFileHeader(const std::string& path) const;
 
 	static LRESULT CALLBACK
 		WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -175,6 +231,13 @@ private:
 
 	SceneGraph												m_sceneGraph;
 	std::vector<EU::TSharedPointer<Actor>> m_actors;
+	std::vector<std::unique_ptr<ImportedMeshAsset>> m_importedMeshAssets;
+	std::vector<MaterialTextureOverride> m_materialTextureOverrides;
+	std::vector<AssetBrowserItem> m_assetBrowserItems;
+	std::vector<std::unique_ptr<Texture>> m_assetBrowserPreviewTextures;
+	unsigned long long m_assetBrowserFingerprint = 0;
+	float m_assetBrowserRefreshTimer = 0.0f;
+	EU::TSharedPointer<Actor> m_cyberGun;
 	EU::TSharedPointer<Actor> m_drakefirePistol;
 	EU::TSharedPointer<Actor> m_sciFiToad;
 	EU::TSharedPointer<Actor> m_directionalLightActor;
@@ -188,10 +251,12 @@ private:
 	//CBNeverChanges											cbNeverChanges;
 	GUI																m_gui;
 	bool m_guiInitialized = false;
+	std::string m_currentScenePath;
 	EU::Vector3 m_cameraPos;
 
 	Skybox m_skybox;
 	Texture															m_skyboxTex;
+	bool m_skyboxReady = false;
 	Texture m_lightIconTexture;
 	RasterizerState m_defaultRasterizer;
 	DepthStencilState m_defaultDepthStencil;

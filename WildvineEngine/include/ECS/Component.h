@@ -61,6 +61,6 @@ public:
   ComponentType 
   getType() const { return m_type; }
 protected:
-  ComponentType m_type; ///< Tipo del componente.
+  ComponentType m_type = ComponentType::NONE; ///< Tipo del componente.
 };
 

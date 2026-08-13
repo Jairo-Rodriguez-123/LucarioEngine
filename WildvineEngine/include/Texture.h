@@ -18,7 +18,7 @@ class DeviceContext;
  * - Texturas creadas en memoria (RTV, DSV, UAV).
  * - Copias a partir de otra textura.
  *
- * Proporciona métodos para inicialización, actualización, uso en shaders y destrucción.
+ * Proporciona mï¿½todos para inicializaciï¿½n, actualizaciï¿½n, uso en shaders y destrucciï¿½n.
  */
 class 
 Texture {
@@ -26,13 +26,17 @@ public:
   /**
    * @brief Constructor por defecto.
    */
-  Texture()  = default;
+  Texture() = default;
+  Texture(const Texture& other);
+  Texture& operator=(const Texture& other);
+  Texture(Texture&& other) noexcept;
+  Texture& operator=(Texture&& other) noexcept;
 
   /**
    * @brief Destructor por defecto.
-   * @details No libera automáticamente los recursos COM; llamar a destroy().
+   * @details No libera automï¿½ticamente los recursos COM; llamar a destroy().
    */
-  ~Texture() = default;
+  ~Texture();
 
   /**
    * @brief Inicializa una textura cargada desde archivo.
@@ -40,10 +44,10 @@ public:
    * Crea un recurso de textura a partir de un archivo de imagen y genera su
    * @c ShaderResourceView correspondiente para ser usado en shaders.
    *
-   * @param device        Dispositivo con el que se creará la textura.
+   * @param device        Dispositivo con el que se crearï¿½ la textura.
    * @param textureName   Nombre o ruta del archivo de textura.
-   * @param extensionType Tipo de extensión de archivo (ej. PNG, JPG, DDS).
-   * @return @c S_OK si fue exitoso; código @c HRESULT en caso contrario.
+   * @param extensionType Tipo de extensiï¿½n de archivo (ej. PNG, JPG, DDS).
+   * @return @c S_OK si fue exitoso; cï¿½digo @c HRESULT en caso contrario.
    *
    * @post Si retorna @c S_OK, @c m_texture y @c m_textureFromImg != nullptr.
    */
@@ -55,17 +59,17 @@ public:
   /**
    * @brief Inicializa una textura creada desde memoria.
    *
-   * Crea un recurso de textura 2D vacío con un tamaño y formato especificados.
-   * Útil para render targets, depth buffers o texturas dinámicas.
+   * Crea un recurso de textura 2D vacï¿½o con un tamaï¿½o y formato especificados.
+   * ï¿½til para render targets, depth buffers o texturas dinï¿½micas.
    *
-   * @param device        Dispositivo con el que se creará la textura.
-   * @param width         Ancho de la textura en píxeles.
-   * @param height        Alto de la textura en píxeles.
+   * @param device        Dispositivo con el que se crearï¿½ la textura.
+   * @param width         Ancho de la textura en pï¿½xeles.
+   * @param height        Alto de la textura en pï¿½xeles.
    * @param Format        Formato DXGI de la textura (ej. DXGI_FORMAT_R8G8B8A8_UNORM).
    * @param BindFlags     Banderas de enlace (ej. @c D3D11_BIND_SHADER_RESOURCE, @c D3D11_BIND_RENDER_TARGET).
-   * @param sampleCount   Número de muestras para MSAA (por defecto 1 = sin MSAA).
+   * @param sampleCount   Nï¿½mero de muestras para MSAA (por defecto 1 = sin MSAA).
    * @param qualityLevels Niveles de calidad soportados para MSAA.
-   * @return @c S_OK si fue exitoso; código @c HRESULT en caso contrario.
+   * @return @c S_OK si fue exitoso; cï¿½digo @c HRESULT en caso contrario.
    */
   HRESULT 
   init(Device & device,
@@ -77,15 +81,28 @@ public:
        unsigned int qualityLevels = 0);
 
   /**
+   * @brief Crea una textura RGBA de 1x1 directamente en memoria.
+   *
+   * Se usa como textura de respaldo para materiales que no tienen archivos
+   * externos disponibles (albedo blanco, normal plana, AO blanco, etc.).
+   */
+  HRESULT
+  initSolidColor(Device& device,
+                 unsigned char r,
+                 unsigned char g,
+                 unsigned char b,
+                 unsigned char a = 255);
+
+  /**
    * @brief Inicializa una textura a partir de otra existente.
    *
-   * Crea una nueva textura basada en la descripción de @p textureRef,
+   * Crea una nueva textura basada en la descripciï¿½n de @p textureRef,
    * con un formato diferente.
    *
-   * @param device     Dispositivo con el que se creará la textura.
+   * @param device     Dispositivo con el que se crearï¿½ la textura.
    * @param textureRef Referencia a otra textura existente.
    * @param format     Nuevo formato DXGI de la textura.
-   * @return @c S_OK si fue exitoso; código @c HRESULT en caso contrario.
+   * @return @c S_OK si fue exitoso; cï¿½digo @c HRESULT en caso contrario.
    */
   HRESULT 
   init(Device& device, Texture& textureRef, DXGI_FORMAT format);
@@ -93,10 +110,10 @@ public:
   /**
    * @brief Actualiza el contenido de la textura.
    *
-   * Método de marcador, útil para soportar carga dinámica de datos o streaming
+   * Mï¿½todo de marcador, ï¿½til para soportar carga dinï¿½mica de datos o streaming
    * de texturas desde CPU hacia GPU.
    *
-   * @note Actualmente no realiza ninguna operación.
+   * @note Actualmente no realiza ninguna operaciï¿½n.
    */
   void 
   update();
@@ -107,9 +124,9 @@ public:
    * Llama a @c PSSetShaderResources para establecer la textura como
    * recurso de shader en la etapa de Pixel Shader.
    *
-   * @param deviceContext Contexto donde se aplicará la textura.
-   * @param StartSlot     Slot inicial en el que se vinculará la textura.
-   * @param NumViews      Número de vistas de recurso a asignar (normalmente 1).
+   * @param deviceContext Contexto donde se aplicarï¿½ la textura.
+   * @param StartSlot     Slot inicial en el que se vincularï¿½ la textura.
+   * @param NumViews      Nï¿½mero de vistas de recurso a asignar (normalmente 1).
    *
    * @pre @c m_textureFromImg debe haberse creado con init().
    */
@@ -141,6 +158,9 @@ public:
     UINT mipLevels = 1
   )
   {
+    if (!device || !cubemapTex || faceIndex >= 6 || format == DXGI_FORMAT_UNKNOWN || mipLevels == 0)
+      return nullptr;
+
     D3D11_SHADER_RESOURCE_VIEW_DESC d{};
     d.Format = format;
     d.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;

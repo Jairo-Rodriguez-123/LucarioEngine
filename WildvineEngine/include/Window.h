@@ -20,7 +20,9 @@ class
 Window {
 public:
 	Window()  = default;
-	~Window() = default;
+	~Window() { destroy(); }
+	Window(const Window&) = delete;
+	Window& operator=(const Window&) = delete;
 
 	/**
 	 * @brief Crea y muestra la ventana principal del motor.
@@ -44,8 +46,8 @@ public:
 
 public:
 	HWND m_hWnd = nullptr;      ///< Handle de la ventana nativa.
-	unsigned int m_width;       ///< Ancho actual del area cliente.
-	unsigned int m_height;      ///< Alto actual del area cliente.
+	unsigned int m_width = 0;       ///< Ancho actual del area cliente.
+	unsigned int m_height = 0;      ///< Alto actual del area cliente.
 private:
 	HINSTANCE m_hInst = nullptr;
 	RECT m_rect;

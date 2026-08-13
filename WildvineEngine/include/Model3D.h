@@ -7,7 +7,7 @@
 #include "Prerequisites.h"
 #include "IResource.h"
 #include "MeshComponent.h"
-#include "fbxsdk.h"
+#include "fbx/fbxsdk.h"
 
 enum 
 ModelType {
@@ -27,14 +27,22 @@ public:
 		const SkyboxVertex vertices[],
 		const unsigned int indices[]) : IResource(name) {
 		MeshComponent mesh;
-		mesh.m_skyVertex.assign(vertices, vertices + 8); 
-		mesh.m_index.assign(indices, indices + 36); 
-		mesh.m_numIndex = mesh.m_index.size();
+		mesh.m_skyVertex.assign(vertices, vertices + 8);
+		mesh.m_index.assign(indices, indices + 36);
+		mesh.m_numVertex = static_cast<int>(mesh.m_skyVertex.size());
+		mesh.m_numIndex = static_cast<int>(mesh.m_index.size());
 		SetType(ResourceType::Model3D);
-		m_meshes.push_back(mesh);
+		SetState(ResourceState::Loaded);
+		m_meshes.push_back(std::move(mesh));
 	}
 
 	~Model3D() override;
+
+	// FBX manager/scene are owning raw SDK handles; copying would double-destroy them.
+	Model3D(const Model3D&) = delete;
+	Model3D& operator=(const Model3D&) = delete;
+	Model3D(Model3D&&) = delete;
+	Model3D& operator=(Model3D&&) = delete;
 
 	bool 
 	load(const std::string& path) override;
@@ -80,11 +88,11 @@ private:
 	bool SaveBinaryCache(const std::string& cachePath) const;
 
 private:
-	FbxManager* lSdkManager;
-	FbxScene* lScene;
+	FbxManager* lSdkManager = nullptr;
+	FbxScene* lScene = nullptr;
 	std::vector<std::string> textureFileNames;
 public:
-	ModelType m_modelType;
+	ModelType m_modelType = ModelType::OBJ;
 	std::vector<MeshComponent> m_meshes;
 };
 

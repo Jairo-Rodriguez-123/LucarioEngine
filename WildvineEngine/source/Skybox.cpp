@@ -12,6 +12,17 @@
 HRESULT
 Skybox::init(Device& device, DeviceContext* deviceContext, Texture& cubemap) {
 	destroy();
+	if (!device.m_device || !deviceContext || !deviceContext->m_deviceContext) {
+		return E_POINTER;
+	}
+	if (!cubemap.m_textureFromImg) {
+		ERROR("Skybox", "init", "Cubemap SRV is null.");
+		return E_INVALIDARG;
+	}
+	auto failInit = [&](HRESULT failure) -> HRESULT {
+		destroy();
+		return failure;
+	};
 	// Cargar el cubemap
 	m_skyboxTexture = cubemap;
 
@@ -55,7 +66,7 @@ Skybox::init(Device& device, DeviceContext* deviceContext, Texture& cubemap) {
 	}
 	else {
 		ERROR("Skybox", "Init", "Failed to create Skybox Actor.");
-		return E_FAIL;
+		return failInit(E_FAIL);
 	}
 
 
@@ -70,7 +81,7 @@ Skybox::init(Device& device, DeviceContext* deviceContext, Texture& cubemap) {
 	if (FAILED(hr)) {
 		ERROR("Skybox", "init",
 			("Failed to initialize ShaderProgram. HRESULT: " + std::to_string(hr)).c_str());
-		return hr;
+		return failInit(hr);
 	}
 
 	// Create the constant buffers
@@ -78,19 +89,21 @@ Skybox::init(Device& device, DeviceContext* deviceContext, Texture& cubemap) {
 	if (FAILED(hr)) {
 		ERROR("Skybox", "init",
 			("Failed to initialize NeverChanges Buffer. HRESULT: " + std::to_string(hr)).c_str());
-		return hr;
+		return failInit(hr);
 	}
 
 	// Init SamplerState
 	hr = m_samplerState.init(device);
 	if (FAILED(hr)) {
 		ERROR("Skybox", "init", "Failed to create new SamplerState");
+		return failInit(hr);
 	}
 
 	// Init Rasterizer
 	hr = m_rasterizerState.init(device, D3D11_FILL_SOLID, D3D11_CULL_FRONT, false, true);
 	if (FAILED(hr)) {
 		ERROR("Skybox", "init", "Failed to create new RasterizerState");
+		return failInit(hr);
 	}
 
 	// Init DepthStencilState
@@ -99,6 +112,7 @@ Skybox::init(Device& device, DeviceContext* deviceContext, Texture& cubemap) {
 															  D3D11_COMPARISON_LESS_EQUAL);
 	if (FAILED(hr)) {
 		ERROR("Skybox", "init", "Failed to create new DepthStencilState");
+		return failInit(hr);
 	}
 
 	return S_OK;
@@ -134,12 +148,25 @@ Skybox::render(DeviceContext& deviceContext) {
 	// 5) Asegura IA (topology + VB/IB) antes del DrawIndexed
 	m_skybox->renderForSkybox(deviceContext);
 
-	// 3) Limpia t0 para evitar mismatch por shaders 2D que usen t0
 	ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
-	deviceContext.m_deviceContext->PSSetShaderResources(10, 1, nullSRV);
-
-	// 5) Unbind t10
-	deviceContext.m_deviceContext->PSSetShaderResources(0, 1, nullSRV);
+	// Unbind cubemap (t10) and clear t0 to avoid SRV hazards with later passes.
+	deviceContext.PSSetShaderResources(10, 1, nullSRV);
+	deviceContext.PSSetShaderResources(0, 1, nullSRV);
 }
 
 
+
+void Skybox::destroy() {
+	if (!m_skybox.isNull()) {
+		m_skybox->destroy();
+		m_skybox.reset();
+	}
+	delete m_cubeModel;
+	m_cubeModel = nullptr;
+	m_skyboxTexture.destroy();
+	m_depthStencilState.destroy();
+	m_rasterizerState.destroy();
+	m_samplerState.destroy();
+	m_constantBuffer.destroy();
+	m_shaderProgram.destroy();
+}

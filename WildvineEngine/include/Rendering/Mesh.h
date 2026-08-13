@@ -5,6 +5,7 @@
 
 struct
 Submesh {
+	Submesh() { XMStoreFloat4x4(&localTransform, XMMatrixIdentity()); }
 	/*
 	 *  @brief Vertex buffer containing the vertex attributes for this submesh.
 	 */
@@ -25,6 +26,8 @@ Submesh {
 	 *  @brief Material slot index used to select the material for this submesh.
 	 */
 	unsigned int materialSlot = 0;
+	/* Local transform imported for this submesh. */
+	XMFLOAT4X4 localTransform{};
 };
 
 class

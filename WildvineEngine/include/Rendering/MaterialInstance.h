@@ -16,7 +16,9 @@ public:
   /*
 	 *  @brief Assigns the albedo (base color) texture for this material instance.
 	*/
-  void setAlbeto(Texture* texture) { m_albedo = texture; }
+  void setAlbedo(Texture* texture) { m_albedo = texture; }
+  // Compatibility with older engine code that used the misspelled API.
+  void setAlbeto(Texture* texture) { setAlbedo(texture); }
   /*
 	 *  @brief Assigns the normal map texture for this material instance.
 	*/

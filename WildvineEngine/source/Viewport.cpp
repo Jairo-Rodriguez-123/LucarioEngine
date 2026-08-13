@@ -45,6 +45,8 @@ Viewport::init(unsigned int width, unsigned int height) {
 	return S_OK;
 }
 
+void Viewport::update() {}
+
 void Viewport::render(DeviceContext& deviceContext) {
 	if (!deviceContext.m_deviceContext) {
 		ERROR("Viewport", "render", "Device context is not set.");

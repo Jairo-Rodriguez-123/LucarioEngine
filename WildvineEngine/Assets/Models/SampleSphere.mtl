@@ -1,0 +1,14 @@
+# Wildvine Engine sample PBR-ish MTL
+newmtl SampleSphereMaterial
+Kd 1.000 1.000 1.000
+Ke 0.20 0.20 0.20
+d 1.000
+Ns 80.0
+Pm 0.18
+Pr 0.42
+map_Kd ../Textures/SampleSphere/SampleSphere_Albedo.png
+map_Bump ../Textures/SampleSphere/SampleSphere_Normal.png
+map_Pm ../Textures/SampleSphere/SampleSphere_Metallic.png
+map_Pr ../Textures/SampleSphere/SampleSphere_Roughness.png
+map_Ka ../Textures/SampleSphere/SampleSphere_AO.png
+map_Ke ../Textures/SampleSphere/SampleSphere_Emissive.png

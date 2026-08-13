@@ -13,9 +13,9 @@ class DeviceContext;
  * @class DepthStencilState
  * @brief Encapsula un @c ID3D11DepthStencilState y su ciclo de vida para la etapa Output-Merger.
  *
- * Administra la creación, configuración, aplicación y destrucción de un estado de
- * profundidad/esténcil en Direct3D 11. Permite activar/desactivar pruebas de profundidad y
- * funcionalidades de esténcil según se requiera.
+ * Administra la creaciï¿½n, configuraciï¿½n, aplicaciï¿½n y destrucciï¿½n de un estado de
+ * profundidad/estï¿½ncil en Direct3D 11. Permite activar/desactivar pruebas de profundidad y
+ * funcionalidades de estï¿½ncil segï¿½n se requiera.
  *
  * @note La clase no posee ni administra la vida de @c Device ni de @c DeviceContext.
  */
@@ -29,21 +29,24 @@ public:
 
   /**
    * @brief Destructor por defecto.
-   * @details No libera automáticamente el recurso COM; llamar a destroy().
+   * @details No libera automï¿½ticamente el recurso COM; llamar a destroy().
    */
-  ~DepthStencilState() = default;
+  ~DepthStencilState() { destroy(); }
+
+  DepthStencilState(const DepthStencilState&) = delete;
+  DepthStencilState& operator=(const DepthStencilState&) = delete;
 
   /**
    * @brief Crea el objeto @c ID3D11DepthStencilState a partir de flags comunes.
    *
-   * Genera y almacena internamente un estado de profundidad/esténcil. La configuración
-   * concreta (función de comparación, máscaras, operaciones de esténcil, etc.) debe definirse
-   * en la implementación de este método, condicionada por @p enableDepth y @p enableStencil.
+   * Genera y almacena internamente un estado de profundidad/estï¿½ncil. La configuraciï¿½n
+   * concreta (funciï¿½n de comparaciï¿½n, mï¿½scaras, operaciones de estï¿½ncil, etc.) debe definirse
+   * en la implementaciï¿½n de este mï¿½todo, condicionada por @p enableDepth y @p enableStencil.
    *
    * @param device         Dispositivo con el que se crea el recurso.
    * @param enableDepth    Habilita la prueba de profundidad (por defecto @c true).
-   * @param enableStencil  Habilita el buffer de esténcil y sus pruebas (por defecto @c false).
-   * @return @c S_OK si la creación fue exitosa; código @c HRESULT en caso contrario.
+   * @param enableStencil  Habilita el buffer de estï¿½ncil y sus pruebas (por defecto @c false).
+   * @return @c S_OK si la creaciï¿½n fue exitosa; cï¿½digo @c HRESULT en caso contrario.
    *
    * @post Si retorna @c S_OK, @c m_depthStencilState != nullptr.
    * @sa render(), destroy()
@@ -55,25 +58,25 @@ public:
     D3D11_COMPARISON_FUNC depthFunc);
 
   /**
-   * @brief Actualiza parámetros internos si la implementación lo requiere.
+   * @brief Actualiza parï¿½metros internos si la implementaciï¿½n lo requiere.
    *
-   * Método placeholder para futuros cambios dinámicos del descriptor de profundidad/esténcil
+   * Mï¿½todo placeholder para futuros cambios dinï¿½micos del descriptor de profundidad/estï¿½ncil
    * (p. ej., recrear el recurso con otros flags).
    *
-   * @note Actualmente no realiza ninguna operación.
+   * @note Actualmente no realiza ninguna operaciï¿½n.
    */
   void 
   update();
 
   /**
-   * @brief Aplica el estado de profundidad/esténcil al contexto (OMSetDepthStencilState).
+   * @brief Aplica el estado de profundidad/estï¿½ncil al contexto (OMSetDepthStencilState).
    *
-   * Vincula el @c ID3D11DepthStencilState al @c DeviceContext. Puede además restablecer el estado
+   * Vincula el @c ID3D11DepthStencilState al @c DeviceContext. Puede ademï¿½s restablecer el estado
    * a @c nullptr si @p reset es @c true.
    *
-   * @param deviceContext  Contexto donde se aplicará el estado.
-   * @param stencilRef     Referencia de esténcil usada por las operaciones de esténcil (por defecto 0).
-   * @param reset          Si es @c true, desvincula el estado después de aplicarlo (setea @c nullptr).
+   * @param deviceContext  Contexto donde se aplicarï¿½ el estado.
+   * @param stencilRef     Referencia de estï¿½ncil usada por las operaciones de estï¿½ncil (por defecto 0).
+   * @param reset          Si es @c true, desvincula el estado despuï¿½s de aplicarlo (setea @c nullptr).
    *
    * @pre @c m_depthStencilState debe haber sido creado con init().
    * @note Internamente invoca @c ID3D11DeviceContext::OMSetDepthStencilState.
@@ -85,7 +88,7 @@ public:
   /**
    * @brief Libera el recurso @c ID3D11DepthStencilState y deja la instancia en estado no inicializado.
    *
-   * Idempotente: puede llamarse múltiples veces de forma segura.
+   * Idempotente: puede llamarse mï¿½ltiples veces de forma segura.
    *
    * @post @c m_depthStencilState == nullptr.
    */
@@ -94,8 +97,8 @@ public:
 
 private:
   /**
-   * @brief Recurso COM de Direct3D 11 para el estado de profundidad/esténcil.
-   * @details Válido tras @c init(); @c nullptr después de @c destroy().
+   * @brief Recurso COM de Direct3D 11 para el estado de profundidad/estï¿½ncil.
+   * @details Vï¿½lido tras @c init(); @c nullptr despuï¿½s de @c destroy().
    */
   ID3D11DepthStencilState* m_depthStencilState = nullptr;
 };

@@ -11,12 +11,12 @@ class DeviceContext;
 
 /**
  * @class Rasterizer
- * @brief Encapsula un @c ID3D11RasterizerState para configurar la etapa de rasterización en el pipeline gráfico.
+ * @brief Encapsula un @c ID3D11RasterizerState para configurar la etapa de rasterizaciï¿½n en el pipeline grï¿½fico.
  *
- * La etapa de rasterización en Direct3D 11 define cómo se transforman las primitivas
- * (triángulos, líneas, puntos) en fragmentos antes de pasar al Pixel Shader.
+ * La etapa de rasterizaciï¿½n en Direct3D 11 define cï¿½mo se transforman las primitivas
+ * (triï¿½ngulos, lï¿½neas, puntos) en fragmentos antes de pasar al Pixel Shader.
  *
- * Esta clase administra la creación, aplicación y destrucción de un @c RasterizerState,
+ * Esta clase administra la creaciï¿½n, aplicaciï¿½n y destrucciï¿½n de un @c RasterizerState,
  * permitiendo configurar opciones como el modo de relleno (wireframe/solid), el culling
  * y la profundidad del clipping.
  */
@@ -30,25 +30,28 @@ public:
 
   /**
    * @brief Destructor por defecto.
-   * @details No libera automáticamente el recurso COM; llamar a destroy().
+   * @details No libera automï¿½ticamente el recurso COM; llamar a destroy().
    */
-  ~RasterizerState() = default;
+  ~RasterizerState() { destroy(); }
+
+  RasterizerState(const RasterizerState&) = delete;
+  RasterizerState& operator=(const RasterizerState&) = delete;
 
   /**
    * @brief Inicializa el Rasterizer State.
    *
-   * Crea un @c ID3D11RasterizerState con una configuración determinada (por ejemplo,
+   * Crea un @c ID3D11RasterizerState con una configuraciï¿½n determinada (por ejemplo,
    * @c D3D11_FILL_SOLID y @c D3D11_CULL_BACK).
-   * La configuración exacta debe definirse en la implementación del método.
+   * La configuraciï¿½n exacta debe definirse en la implementaciï¿½n del mï¿½todo.
    *
-   * @param device Dispositivo con el que se creará el recurso.
-   * @return @c S_OK si la creación fue exitosa; código @c HRESULT en caso de error.
+   * @param device Dispositivo con el que se crearï¿½ el recurso.
+   * @return @c S_OK si la creaciï¿½n fue exitosa; cï¿½digo @c HRESULT en caso de error.
    *
    * @post Si retorna @c S_OK, @c m_rasterizerState != nullptr.
    * @sa render(), destroy()
    */
   HRESULT 
-  init(Device device);
+  init(Device& device);
   
   HRESULT 
   init(Device& device,
@@ -58,12 +61,12 @@ public:
        bool depthClip);
 
   /**
-   * @brief Actualiza parámetros internos del Rasterizer.
+   * @brief Actualiza parï¿½metros internos del Rasterizer.
    *
-   * Método de marcador para recrear o modificar dinámicamente la configuración
+   * Mï¿½todo de marcador para recrear o modificar dinï¿½micamente la configuraciï¿½n
    * del rasterizador.
    *
-   * @note Actualmente no realiza ninguna operación.
+   * @note Actualmente no realiza ninguna operaciï¿½n.
    */
   void 
   update();
@@ -73,7 +76,7 @@ public:
    *
    * Llama a @c ID3D11DeviceContext::RSSetState para establecer el rasterizador activo.
    *
-   * @param deviceContext Contexto donde se aplicará el rasterizer state.
+   * @param deviceContext Contexto donde se aplicarï¿½ el rasterizer state.
    *
    * @pre @c m_rasterizerState debe haberse creado con init().
    */
@@ -83,7 +86,7 @@ public:
   /**
    * @brief Libera el recurso @c ID3D11RasterizerState.
    *
-   * Idempotente: puede llamarse múltiples veces de forma segura.
+   * Idempotente: puede llamarse mï¿½ltiples veces de forma segura.
    *
    * @post @c m_rasterizerState == nullptr.
    */
@@ -92,8 +95,8 @@ public:
 
 private:
   /**
-   * @brief Estado de rasterización de Direct3D 11.
-   * @details Válido después de init(); @c nullptr tras destroy().
+   * @brief Estado de rasterizaciï¿½n de Direct3D 11.
+   * @details Vï¿½lido despuï¿½s de init(); @c nullptr tras destroy().
    */
   ID3D11RasterizerState* m_rasterizerState = nullptr;
 };

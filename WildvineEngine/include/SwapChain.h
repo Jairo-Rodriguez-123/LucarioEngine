@@ -33,7 +33,10 @@ public:
    * @brief Destructor por defecto.
    * @details No libera automáticamente los recursos COM; llamar a destroy().
    */
-  ~SwapChain() = default;
+  ~SwapChain() { destroy(); }
+
+  SwapChain(const SwapChain&) = delete;
+  SwapChain& operator=(const SwapChain&) = delete;
 
   /**
    * @brief Inicializa el Swap Chain y obtiene el back buffer.
@@ -53,7 +56,7 @@ public:
   init(Device& device,
        DeviceContext& deviceContext,
        Texture& backBuffer,
-       Window window);
+       const Window& window);
 
   /**
    * @brief Actualiza parámetros internos del Swap Chain.
@@ -126,12 +129,12 @@ private:
    *
    * Ejemplo: 4 = 4x MSAA (4 muestras por píxel).
    */
-  unsigned int m_sampleCount;
+  unsigned int m_sampleCount = 1;
 
   /**
    * @brief Niveles de calidad soportados para la configuración de MSAA.
    */
-  unsigned int m_qualityLevels;
+  unsigned int m_qualityLevels = 0;
 
   /**
    * @brief Interfaz DXGI para el dispositivo.

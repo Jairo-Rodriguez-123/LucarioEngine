@@ -13,6 +13,7 @@ InputLayout::init(Device& device,
                   UINT layoutCount,
                   ID3DBlob* vertexShaderData)
 {
+  if (!device.m_device) return E_POINTER;
   if (!layoutDesc || layoutCount == 0) {
     ERROR("InputLayout", "init", "Layout descriptor is empty.");
     return E_INVALIDARG;
@@ -23,6 +24,7 @@ InputLayout::init(Device& device,
     return E_POINTER;
   }
 
+  destroy();
   HRESULT hr = device.CreateInputLayout(layoutDesc, layoutCount,
                                         vertexShaderData->GetBufferPointer(),
                                         vertexShaderData->GetBufferSize(),
@@ -49,7 +51,7 @@ InputLayout::render(DeviceContext& deviceContext) {
 		return;
 	}
 
-	deviceContext.m_deviceContext->IASetInputLayout(m_inputLayout);
+	deviceContext.IASetInputLayout(m_inputLayout);
 }
 
 void

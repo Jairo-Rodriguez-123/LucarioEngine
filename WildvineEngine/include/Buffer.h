@@ -30,13 +30,17 @@ public:
   /**
    * @brief Constructor por defecto (no crea recursos).
    */
-  Buffer()  = default;
+  Buffer() = default;
+  Buffer(const Buffer& other);
+  Buffer& operator=(const Buffer& other);
+  Buffer(Buffer&& other) noexcept;
+  Buffer& operator=(Buffer&& other) noexcept;
 
   /**
    * @brief Destructor por defecto.
    * @details No libera automáticamente; llamar a destroy() para liberar el recurso COM.
    */
-  ~Buffer() = default;
+  ~Buffer();
 
   /**
    * @brief Inicializa el buffer como Vertex o Index Buffer usando un @c MeshComponent.

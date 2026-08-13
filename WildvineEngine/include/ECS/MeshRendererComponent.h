@@ -15,7 +15,7 @@ class
 MeshRendererComponent : public Component {
 public:
 	MeshRendererComponent()
-		: Component(ComponentType::MESH) {}
+		: Component(ComponentType::MESH_RENDERER) {}
 
 	void init() override {}
 	void update(float deltaTime) override {}

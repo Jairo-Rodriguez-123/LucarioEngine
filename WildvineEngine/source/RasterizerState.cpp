@@ -8,7 +8,9 @@
 #include "DeviceContext.h"
 
 HRESULT
-RasterizerState::init(Device device) {
+RasterizerState::init(Device& device) {
+	if (!device.m_device) return E_POINTER;
+	destroy();
 	D3D11_RASTERIZER_DESC rasterizerDesc = {};
 	rasterizerDesc.FillMode = D3D11_FILL_SOLID;
 	rasterizerDesc.CullMode = D3D11_CULL_BACK;
@@ -36,6 +38,8 @@ RasterizerState::init(Device& device,
                       D3D11_CULL_MODE cull,
                       bool frontCCW,
                       bool depthClip) {
+	if (!device.m_device) return E_POINTER;
+	destroy();
 	D3D11_RASTERIZER_DESC desc{};
 	desc.FillMode = fill;
 	desc.CullMode = cull;

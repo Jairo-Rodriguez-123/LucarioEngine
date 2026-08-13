@@ -33,8 +33,8 @@
 */
 #pragma once
 
-#include "Utilities/EngineMath.h"
-#include "Vector3.h"
+#include "EngineUtilities/Utilities/EngineMath.h"
+#include "EngineUtilities/Vectors/Vector3.h"
 namespace EU {
 	/**
  * @brief A quaternion class.

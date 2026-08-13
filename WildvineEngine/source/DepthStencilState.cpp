@@ -13,9 +13,10 @@ DepthStencilState::init(Device& device,
 												D3D11_DEPTH_WRITE_MASK writeMask,
 												D3D11_COMPARISON_FUNC depthFunc) {
 	if (!device.m_device) {
-		ERROR("ShaderProgram", "init", "Device is null.");
+		ERROR("DepthStencilState", "init", "Device is null.");
 		return E_POINTER;
 	}
+	destroy();
 	D3D11_DEPTH_STENCIL_DESC desc{};
 	desc.DepthEnable = depthEnable;
 	desc.DepthWriteMask = writeMask;
@@ -40,10 +41,10 @@ DepthStencilState::render(DeviceContext& deviceContext,
 	unsigned int stencilRef,
 	bool reset) {
 	if (!deviceContext.m_deviceContext) {
-		ERROR("RenderTargetView", "render", "DeviceContext is nullptr.");
+		ERROR("DepthStencilState", "render", "DeviceContext is nullptr.");
 		return;
 	}
-	if (!m_depthStencilState) {
+	if (!reset && !m_depthStencilState) {
 		ERROR("DepthStencilState", "render", "DepthStencilState is nullptr");
 		return;
 	}

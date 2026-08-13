@@ -7,22 +7,25 @@
 #include "Prerequisites.h"
 #include "EngineUtilities/Vectors/Vector3.h"
 #include "Component.h"
+#include <cmath>
 
 class 
 Transform : public Component {
 public:
   // Constructor que inicializa posición, rotación y escala por defecto
-  Transform() : position(), 
-                rotation(), 
-                scale(), 
-                matrix(), 
-                worldMatrix(),
-                Component(ComponentType::TRANSFORM) {}
+  Transform() : Component(ComponentType::TRANSFORM),
+                position(0.0f, 0.0f, 0.0f),
+                rotation(0.0f, 0.0f, 0.0f),
+                scale(1.0f, 1.0f, 1.0f),
+                matrix(XMMatrixIdentity()),
+                worldMatrix(XMMatrixIdentity()) {}
 
   // Métodos para inicialización, actualización, renderizado y destrucción
   // Inicializa el objeto Transform
   void 
   init() {
+    position.zero();
+    rotation.zero();
     scale.one();
     matrix = XMMatrixIdentity();
     worldMatrix = XMMatrixIdentity();
@@ -60,7 +63,9 @@ public:
 
   // Establece una nueva posición
   void 
-  setPosition(const EU::Vector3& newPos) { position = newPos; }
+  setPosition(const EU::Vector3& newPos) {
+    if (isFiniteVector(newPos)) position = newPos;
+  }
 
   // Métodos de acceso a los datos de rotación
   // Retorna la rotación actual
@@ -69,7 +74,9 @@ public:
 
   // Establece una nueva rotación
   void 
-  setRotation(const EU::Vector3& newRot) { rotation = newRot; }
+  setRotation(const EU::Vector3& newRot) {
+    if (isFiniteVector(newRot)) rotation = newRot;
+  }
 
   // Métodos de acceso a los datos de escala
   // Retorna la escala actual
@@ -78,23 +85,31 @@ public:
 
   // Establece una nueva escala
   void 
-  setScale(const EU::Vector3& newScale) { scale = newScale; }
+  setScale(const EU::Vector3& newScale) {
+    if (isFiniteVector(newScale)) scale = newScale;
+  }
 
   void
   setTransform(const EU::Vector3& newPos, 
                const EU::Vector3& newRot,
                const EU::Vector3& newSca) {
-    position = newPos;
-    rotation = newRot;
-    scale = newSca;
+    setPosition(newPos);
+    setRotation(newRot);
+    setScale(newSca);
   }
 
   // Método para trasladar la posición del objeto
   // @param translation: Vector que representa la cantidad de traslado en cada eje
   void 
-  translate(const EU::Vector3& translation);
+  translate(const EU::Vector3& translation) {
+    if (isFiniteVector(translation)) position += translation;
+  }
 
 private:
+  static bool isFiniteVector(const EU::Vector3& value) {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+  }
+
   EU::Vector3 position;  // Posición del objeto
   EU::Vector3 rotation;  // Rotación del objeto
   EU::Vector3 scale;     // Escala del objeto

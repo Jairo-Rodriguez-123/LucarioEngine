@@ -5,7 +5,7 @@
  */
 #pragma once
 #include "Prerequisites.h"
-#include "EngineUtilities\Vectors\Vector3.h"
+#include "EngineUtilities/Vectors/Vector3.h"
 
 class 
 Camera {
@@ -14,49 +14,46 @@ public:
 	~Camera() = default;
 
 	/**
-		 * @brief Configura la proyección en perspectiva (LH).
+		 * @brief Configura la proyecciï¿½n en perspectiva (LH).
 		 *
 		 * **Pasos**
-		 * - Calcula la matriz de proyección con XMMatrixPerspectiveFovLH.
-		 * - Guarda FOV, aspect, near y far para debug/inspección.
+		 * - Calcula la matriz de proyecciï¿½n con XMMatrixPerspectiveFovLH.
+		 * - Guarda FOV, aspect, near y far para debug/inspecciï¿½n.
 		 *
-		 * **Aplicación práctica**
-		 * - Llamar al inicializar ventana y al cambiar resolución.
+		 * **Aplicaciï¿½n prï¿½ctica**
+		 * - Llamar al inicializar ventana y al cambiar resoluciï¿½n.
 		 */
 	void 
 	setLens(float fovYRadians, float aspectRatio, float nearPlane, float farPlane);
 
 	/**
-	 * @brief Define posición en mundo.
+	 * @brief Define posiciï¿½n en mundo.
 	 */
 	void
 	setPosition(float x, float y, float z);
 
 	/**
-	 * @brief Define posición en mundo.
+	 * @brief Define posiciï¿½n en mundo.
 	 */
 	void
 	setPosition(const EU::Vector3& pos);
 
 	/**
-	 * @brief Obtiene la posición en mundo.
+	 * @brief Obtiene la posiciï¿½n en mundo.
 	 */
 	EU::Vector3 
 	getPosition() const { return m_position; }
-	
-	EU::Vector3 &
-	getPosition() { return m_position; }
 
 	/**
-	 * @brief Fuerza la cámara a mirar a un objetivo (LH).
+	 * @brief Fuerza la cï¿½mara a mirar a un objetivo (LH).
 	 *
 	 * **Pasos**
 	 * - Calcula basis a partir de (target - pos).
 	 * - Normaliza Forward, Right y Up.
 	 * - Marca dirty para recalcular View.
 	 *
-	 * **Aplicación práctica**
-	 * - Cinemáticas simples o cámaras orbit.
+	 * **Aplicaciï¿½n prï¿½ctica**
+	 * - Cinemï¿½ticas simples o cï¿½maras orbit.
 	 */
 	void
 	lookAt(const EU::Vector3& pos,
@@ -64,30 +61,30 @@ public:
 				 const EU::Vector3& up = EU::Vector3(0, 1, 0));
 
 	/**
-	 * @brief Movimiento relativo a la cámara (adelante/atrás).
+	 * @brief Movimiento relativo a la cï¿½mara (adelante/atrï¿½s).
 	 */
 	void 
 	walk(float d);
 
 	/**
-	 * @brief Movimiento relativo a la cámara (izquierda/derecha).
+	 * @brief Movimiento relativo a la cï¿½mara (izquierda/derecha).
 	 */
 	void 
 	strafe(float d);
 
 	/**
-	 * @brief Rotación sobre el eje Y global (yaw).
+	 * @brief Rotaciï¿½n sobre el eje Y global (yaw).
 	 *
-	 * **Aplicación práctica**
+	 * **Aplicaciï¿½n prï¿½ctica**
 	 * - Mouse X para FPS.
 	 */
 	void 
 	yaw(float radians);
 
 	/**
-	 * @brief Rotación sobre el eje Right local (pitch).
+	 * @brief Rotaciï¿½n sobre el eje Right local (pitch).
 	 *
-	 * **Aplicación práctica**
+	 * **Aplicaciï¿½n prï¿½ctica**
 	 * - Mouse Y para FPS.
 	 */
 	void 
@@ -100,7 +97,7 @@ public:
 	 * - Reconstruye basis ortonormal (Right/Up/Forward).
 	 * - Calcula View con XMMatrixLookToLH.
 	 *
-	 * **Aplicación práctica**
+	 * **Aplicaciï¿½n prï¿½ctica**
 	 * - Llamar una vez por frame antes de render.
 	 */
 	void 
@@ -119,21 +116,21 @@ public:
 	getProj() const { return XMLoadFloat4x4(&m_proj); }
 
 	/**
-	 * @brief View sin traslación (solo rotación). Ideal para Skybox.
+	 * @brief View sin traslaciï¿½n (solo rotaciï¿½n). Ideal para Skybox.
 	 *
-	 * **Aplicación práctica**
+	 * **Aplicaciï¿½n prï¿½ctica**
 	 * - Skybox: ViewNoTranslation * Proj
 	 */
 	XMMATRIX 
 	GetViewNoTranslation() const {
 		XMMATRIX v = getView();
-		// Quitar traslación (fila 4)
+		// Quitar traslaciï¿½n (fila 4)
 		v.r[3] = XMVectorSet(0, 0, 0, 1);
 		return v;
 	}
 
 	/**
-	 * @brief Devuelve parámetros de proyección (útil para UI/debug).
+	 * @brief Devuelve parï¿½metros de proyecciï¿½n (ï¿½til para UI/debug).
 	 */
 	float getFovY()   const { return m_fovY; }
 	float getAspect() const { return m_aspectRatio; }
@@ -141,7 +138,7 @@ public:
 	float getFarZ()   const { return m_farPlane; }
 
 	/**
-	 * @brief Vectores base (mundo) de la cámara.
+	 * @brief Vectores base (mundo) de la cï¿½mara.
 	 */
 	EU::Vector3 GetRight()   const { return m_right; }
 	EU::Vector3 GetUp()      const { return m_up; }

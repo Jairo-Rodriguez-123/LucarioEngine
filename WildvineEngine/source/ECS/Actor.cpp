@@ -7,12 +7,24 @@
 #include "MeshComponent.h"
 #include "Device.h"
 #include "DeviceContext.h"
+#include <limits>
+
+Actor::Actor() {
+	auto transform = EU::MakeShared<Transform>();
+	transform->init();
+	addComponent(transform);
+	auto meshComponent = EU::MakeShared<MeshComponent>();
+	meshComponent->init();
+	addComponent(meshComponent);
+}
 
 Actor::Actor(Device& device) {
 	// Setup Default Components
 	EU::TSharedPointer<Transform> transform = EU::MakeShared<Transform>();
+	transform->init();
 	addComponent(transform);
 	EU::TSharedPointer<MeshComponent> meshComponent = EU::MakeShared<MeshComponent>();
+	meshComponent->init();
 	addComponent(meshComponent);
 
 	HRESULT hr;
@@ -74,6 +86,7 @@ Actor::Actor(Device& device) {
 
 void
 Actor::update(float deltaTime, DeviceContext& deviceContext) {
+  (void)deviceContext;
 	// Update all components
 	for (auto& component : m_components) {
 		if (component) {
@@ -81,51 +94,76 @@ Actor::update(float deltaTime, DeviceContext& deviceContext) {
 		}
 	}
 
-	// Update the model buffer
-	m_model.mWorld = XMMatrixTranspose(getComponent<Transform>()->matrix);
+}
+
+void
+Actor::syncModelBuffer(DeviceContext& deviceContext) {
+	if (!deviceContext.m_deviceContext || !m_modelBuffer.m_buffer) {
+		return;
+	}
+	auto transform = getComponent<Transform>();
+	if (!transform) {
+		return;
+	}
+	m_model.mWorld = XMMatrixTranspose(transform->worldMatrix);
 	m_model.vMeshColor = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-	// Update the constant buffer
 	m_modelBuffer.update(deviceContext, nullptr, 0, nullptr, &m_model, 0, 0);
 }
 
 void
 Actor::render(DeviceContext& deviceContext) {
+	if (!deviceContext.m_deviceContext) return;
+	syncModelBuffer(deviceContext);
 	m_sampler.render(deviceContext, 0, 1);
-
 	deviceContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	// Update buffer and render all components
-	for (unsigned int i = 0; i < m_meshes.size(); i++)
-	{
+
+	const size_t drawCount = std::min(m_meshes.size(), std::min(m_vertexBuffers.size(), m_indexBuffers.size()));
+	for (size_t i = 0; i < drawCount; ++i) {
 		m_vertexBuffers[i].render(deviceContext, 0, 1);
 		m_indexBuffers[i].render(deviceContext, 0, 1, false, DXGI_FORMAT_R32_UINT);
 		m_modelBuffer.render(deviceContext, 1, 1, true);
 
-		// Limpieza por mesh (evita herencias)
-		ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
-		deviceContext.m_deviceContext->PSSetShaderResources(0, 1, nullSRV);
-
-		// Bind correcto por mesh
-		if (i < m_textures.size()) {
-			for (int k = 0; k < m_textures.size(); k++) {
-				m_textures[k].render(deviceContext, k, 1);   // albedo mesh i
-			}
+		const size_t requestedSlots = std::max(m_lastTextureSlotCount, m_textures.size());
+		const size_t clearSlots = std::min(requestedSlots, static_cast<size_t>(D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT));
+		if (clearSlots > 0) {
+			std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> nullSRVs{};
+			deviceContext.PSSetShaderResources(0, static_cast<unsigned int>(clearSlots), nullSRVs.data());
 		}
-		// else: se queda null
-		deviceContext.DrawIndexed(m_meshes[i].m_numIndex, 0, 0);
+		const size_t textureCount = std::min(m_textures.size(), static_cast<size_t>(D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT));
+		for (size_t k = 0; k < textureCount; ++k) {
+			m_textures[k].render(deviceContext, static_cast<unsigned int>(k), 1);
+		}
+		m_lastTextureSlotCount = textureCount;
+		deviceContext.DrawIndexed(static_cast<unsigned int>(m_meshes[i].m_index.size()), 0, 0);
 	}
 }
 
 void
 Actor::renderForSkybox(DeviceContext& deviceContext) {
+	if (!deviceContext.m_deviceContext) return;
 	deviceContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	// Update buffer and render all components
-	for (unsigned int i = 0; i < m_meshes.size(); i++) {
+	const size_t drawCount = std::min(m_meshes.size(), std::min(m_vertexBuffers.size(), m_indexBuffers.size()));
+	for (size_t i = 0; i < drawCount; ++i) {
 		m_vertexBuffers[i].render(deviceContext, 0, 1);
 		m_indexBuffers[i].render(deviceContext, 0, 1, false, DXGI_FORMAT_R32_UINT);
-
-		deviceContext.DrawIndexed(m_meshes[i].m_numIndex, 0, 0);
+		deviceContext.DrawIndexed(static_cast<unsigned int>(m_meshes[i].m_index.size()), 0, 0);
 	}
 }
+
+void
+Actor::renderShadow(DeviceContext& deviceContext) {
+	if (!castShadow || !deviceContext.m_deviceContext) return;
+	syncModelBuffer(deviceContext);
+	deviceContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	const size_t drawCount = std::min(m_meshes.size(), std::min(m_vertexBuffers.size(), m_indexBuffers.size()));
+	for (size_t i = 0; i < drawCount; ++i) {
+		m_vertexBuffers[i].render(deviceContext, 0, 1);
+		m_indexBuffers[i].render(deviceContext, 0, 1, false, DXGI_FORMAT_R32_UINT);
+		m_modelBuffer.render(deviceContext, 1, 1, false);
+		deviceContext.DrawIndexed(static_cast<unsigned int>(m_meshes[i].m_index.size()), 0, 0);
+	}
+}
+
 
 
 void
@@ -142,6 +180,14 @@ Actor::destroy() {
 		tex.destroy();
 	}
 	m_modelBuffer.destroy();
+	m_shaderBuffer.destroy();
+	m_shaderShadow.destroy();
+	m_shadowDepthStencilState.destroy();
+	m_vertexBuffers.clear();
+	m_indexBuffers.clear();
+	m_textures.clear();
+	m_lastTextureSlotCount = 0;
+	m_meshes.clear();
 
 	//m_rasterizer.destroy();
 	//m_blendstate.destroy();
@@ -150,29 +196,39 @@ Actor::destroy() {
 
 void
 Actor::setMesh(Device& device, std::vector<MeshComponent> meshes) {
-	m_meshes = meshes;
-	HRESULT hr;
-	for (auto& mesh : m_meshes) {
-		// Crear vertex buffer
-		Buffer vertexBuffer;
-		hr = vertexBuffer.init(device, mesh, D3D11_BIND_VERTEX_BUFFER);
-		if (FAILED(hr)) {
-			ERROR("Actor", "setMesh", "Failed to create new vertexBuffer");
+	for (auto& b : m_vertexBuffers) b.destroy();
+	for (auto& b : m_indexBuffers) b.destroy();
+	m_vertexBuffers.clear();
+	m_indexBuffers.clear();
+	m_meshes.clear();
+
+	for (auto& mesh : meshes) {
+		if ((mesh.m_vertex.empty() && mesh.m_skyVertex.empty()) || mesh.m_index.empty()) {
+			ERROR("Actor", "setMesh", "Skipping empty mesh");
+			continue;
 		}
-		else {
-			m_vertexBuffers.push_back(vertexBuffer);
+		if (mesh.m_vertex.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+			mesh.m_skyVertex.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+			mesh.m_index.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+			ERROR("Actor", "setMesh", "Skipping mesh that exceeds engine mesh counters");
+			continue;
+		}
+		mesh.m_numVertex = static_cast<int>(!mesh.m_vertex.empty() ? mesh.m_vertex.size() : mesh.m_skyVertex.size());
+		mesh.m_numIndex = static_cast<int>(mesh.m_index.size());
+
+		Buffer vertexBuffer;
+		Buffer indexBuffer;
+		if (FAILED(vertexBuffer.init(device, mesh, D3D11_BIND_VERTEX_BUFFER))) {
+			ERROR("Actor", "setMesh", "Failed to create vertex buffer");
+			continue;
+		}
+		if (FAILED(indexBuffer.init(device, mesh, D3D11_BIND_INDEX_BUFFER))) {
+			ERROR("Actor", "setMesh", "Failed to create index buffer");
+			continue;
 		}
 
-		// Crear index buffer
-		Buffer indexBuffer;
-		hr = indexBuffer.init(device, mesh, D3D11_BIND_INDEX_BUFFER);
-		if (FAILED(hr)) {
-			ERROR("Actor", "setMesh", "Failed to create new indexBuffer");
-		}
-		else {
-			m_indexBuffers.push_back(indexBuffer);
-		}
+		m_meshes.push_back(std::move(mesh));
+		m_vertexBuffers.push_back(std::move(vertexBuffer));
+		m_indexBuffers.push_back(std::move(indexBuffer));
 	}
 }
-
-

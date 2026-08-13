@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "Prerequisites.h"
+#include <unordered_set>
 
 class Entity;
 class DeviceContext;
@@ -62,8 +63,8 @@ public:
 	void
 	destroy();
 private:
-	void 
-	updateWorldRecursive(Entity* node, const XMMATRIX& parentWorld);
+	void
+	updateWorldRecursive(Entity* node, const XMMATRIX& parentWorld, std::unordered_set<Entity*>& visited);
 
 	bool 
 	isRoot(Entity* e) const;
