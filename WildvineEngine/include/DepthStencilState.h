@@ -13,9 +13,9 @@ class DeviceContext;
  * @class DepthStencilState
  * @brief Encapsula un @c ID3D11DepthStencilState y su ciclo de vida para la etapa Output-Merger.
  *
- * Administra la creaci�n, configuraci�n, aplicaci�n y destrucci�n de un estado de
- * profundidad/est�ncil en Direct3D 11. Permite activar/desactivar pruebas de profundidad y
- * funcionalidades de est�ncil seg�n se requiera.
+ * Administra la creacion, configuracion, aplicacion y destruccion de un estado de
+ * profundidad/estencil en Direct3D 11. Permite activar/desactivar pruebas de profundidad y
+ * funcionalidades de estencil segun se requiera.
  *
  * @note La clase no posee ni administra la vida de @c Device ni de @c DeviceContext.
  */

@@ -13,11 +13,11 @@ class LayoutBuilder;
 
 /**
  * @class ShaderProgram
- * @brief Encapsula la creaci�n, compilaci�n y uso de Vertex Shader y Pixel Shader en Direct3D 11.
+ * @brief Encapsula la creacion, compilacion y uso de Vertex Shader y Pixel Shader en Direct3D 11.
  *
  * Esta clase administra el ciclo de vida de un conjunto de shaders (VS y PS),
- * incluyendo su compilaci�n desde archivo, creaci�n en el dispositivo y vinculaci�n
- * al pipeline. Adem�s, maneja el Input Layout asociado al Vertex Shader.
+ * incluyendo su compilacion desde archivo, creacion en el dispositivo y vinculacion
+ * al pipeline. Ademas, maneja el Input Layout asociado al Vertex Shader.
  */
 class 
 ShaderProgram {

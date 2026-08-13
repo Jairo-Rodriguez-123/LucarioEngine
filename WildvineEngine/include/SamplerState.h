@@ -18,7 +18,7 @@ class DeviceContext;
  * - Direccionamiento (wrap, mirror, clamp, border).
  * - Nivel de mipmapping.
  *
- * Esta clase administra la creaci�n, aplicaci�n y destrucci�n de un @c SamplerState.
+ * Esta clase administra la creacion, aplicacion y destruccion de un @c SamplerState.
  */
 class 
 SamplerState {
