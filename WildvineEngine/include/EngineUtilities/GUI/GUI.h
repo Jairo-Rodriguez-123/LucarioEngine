@@ -107,7 +107,9 @@ enum class SceneEditorAction {
   SaveSceneAs,
   DuplicateActor,
   DeleteActor,
-  RenameActor
+  RenameActor,
+  Undo,
+  Redo
 };
 
 /**
@@ -122,6 +124,25 @@ struct SceneEditorRequest {
   SceneEditorAction action = SceneEditorAction::None;
   int actorIndex = -1;
   std::string text;
+};
+
+/**
+ * @enum SkyboxEditorAction
+ * @brief Acciones diferidas del editor de skybox panoramico.
+ */
+enum class SkyboxEditorAction {
+  None = 0,
+  BrowseTexture,
+  ResetDefault
+};
+
+/**
+ * @struct SkyboxEditorRequest
+ * @brief Solicitud segura para cambiar la textura panoramica al inicio del siguiente frame.
+ */
+struct SkyboxEditorRequest {
+  bool pending = false;
+  SkyboxEditorAction action = SkyboxEditorAction::None;
 };
 
 /**
@@ -264,6 +285,19 @@ public:
     return true;
   }
 
+  bool consumeSkyboxEditorRequest(SkyboxEditorRequest& outRequest) {
+    if (!m_skyboxEditorRequest.pending) {
+      return false;
+    }
+    outRequest = m_skyboxEditorRequest;
+    m_skyboxEditorRequest.pending = false;
+    return true;
+  }
+
+  void setSkyboxTextureDisplayName(const std::string& name) {
+    m_skyboxTextureDisplayName = name.empty() ? "None" : name;
+  }
+
   /**
    * @brief Consume una solicitud de reemplazo/restauracion de textura.
    */
@@ -274,6 +308,28 @@ public:
     outRequest = m_materialTextureRequest;
     m_materialTextureRequest.pending = false;
     return true;
+  }
+
+  /**
+   * @brief Consume un commit de historial generado por una edicion directa de GUI.
+   *
+   * Los widgets de Transform/Material modifican componentes en el mismo frame, por
+   * lo que la GUI emite este commit cuando finaliza la interaccion. BaseApp toma un
+   * snapshot de la escena completa y lo incorpora al historial Undo/Redo.
+   */
+  bool consumeHistoryCommitRequest(std::string& outLabel) {
+    if (!m_historyCommitRequested) {
+      return false;
+    }
+    outLabel = m_historyCommitLabel.empty() ? std::string("Edit") : m_historyCommitLabel;
+    m_historyCommitRequested = false;
+    m_historyCommitLabel.clear();
+    return true;
+  }
+
+  void setHistoryAvailability(bool canUndo, bool canRedo) {
+    m_canUndo = canUndo;
+    m_canRedo = canRedo;
   }
 
   bool consumeCreateLightActorRequest() {
@@ -289,6 +345,7 @@ public:
   }
 
   void drawEditorDockspace();
+  void drawEditorStatusBar();
 
   /**
    * @brief Consume de forma atomica la solicitud de guardado emitida desde la UI.
@@ -314,6 +371,13 @@ private:
   bool m_requestImportMesh = false;
   bool m_showMaterialEditor = false;
   bool m_showAssetBrowser = false;
+  bool m_lockEditorLayout = true;
+  bool m_showLeftRail = true;
+  bool m_showRightRail = true;
+  bool m_showGBufferPanel = true;
+  bool m_showRenderDebugPanel = true;
+  bool m_showHierarchyPanel = true;
+  bool m_showInspectorPanel = true;
   int m_materialEditorSlot = 0;
   int m_assetBrowserMaterialSlot = 0;
   int m_assetBrowserTextureChannel = 0;
@@ -323,11 +387,25 @@ private:
   MaterialTextureEditRequest m_materialTextureRequest{};
   AssetBrowserRequest m_assetBrowserRequest{};
   SceneEditorRequest m_sceneEditorRequest{};
+  SkyboxEditorRequest m_skyboxEditorRequest{};
+  std::string m_skyboxTextureDisplayName = "None";
   bool m_openRenameActorPopup = false;
   int m_renameActorIndex = -1;
   char m_renameActorBuffer[128] = {};
   ImDrawList* m_viewportDrawList = nullptr;
   bool m_viewportActive = false;
+  bool m_historyCommitRequested = false;
+  std::string m_historyCommitLabel;
+  bool m_canUndo = false;
+  bool m_canRedo = false;
+  bool m_wasUsingGizmoLastFrame = false;
+
+  void requestHistoryCommit(const char* label) {
+    m_historyCommitRequested = true;
+    if (label && *label) {
+      m_historyCommitLabel = label;
+    }
+  }
 
 public:
   bool m_isUsingGizmo = false;               ///< Indica si el gizmo esta capturando entrada del usuario.
@@ -338,6 +416,23 @@ public:
   bool m_viewportFocused = false;            ///< Indica si el viewport tiene foco de entrada.
   bool m_visualizeDeferredShadowFactor = false;
   int m_deferredDebugViewMode = 0;
+
+  // Deferred post-process stack (V16). These values are consumed by BaseApp
+  // and forwarded to the active DeferredRenderer every frame.
+  bool m_postProcessEnabled = true;
+  bool m_bloomEnabled = true;
+  bool m_tonemappingEnabled = true;
+  bool m_fxaaEnabled = true;
+  float m_bloomThreshold = 0.85f;
+  float m_bloomIntensity = 0.65f;
+  float m_postExposure = 1.0f;
+  float m_fxaaStrength = 1.0f;
+
+  // Panoramic/equirectangular skybox controls (V17).
+  bool m_skyboxEnabled = true;
+  float m_skyboxIntensity = 1.0f;
+  float m_skyboxRotationDegrees = 0.0f;
+  float m_skyboxTint[3] = { 1.0f, 1.0f, 1.0f };
 };
 
 

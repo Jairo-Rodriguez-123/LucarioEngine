@@ -36,11 +36,17 @@ public:
 	ID3D11ShaderResourceView* getGBufferEmissiveAlphaSRV() const;
 	void setShadowFactorDebugEnabled(bool enabled);
 	void setDeferredDebugViewMode(int mode);
+	void setPostProcessEnabled(bool enabled);
+	void setBloomEnabled(bool enabled);
+	void setTonemappingEnabled(bool enabled);
+	void setFXAAEnabled(bool enabled);
+	void setBloomThreshold(float value);
+	void setBloomIntensity(float value);
+	void setExposure(float value);
+	void setFXAAStrength(float value);
 
 private:
 	HRESULT ensureRendererInitialized(RendererType rendererType, Device& device);
-	ISceneRenderer* resolveRenderer(RendererType rendererType);
-	const ISceneRenderer* resolveRenderer(RendererType rendererType) const;
 
 private:
 	ForwardRenderer m_forwardRenderer;

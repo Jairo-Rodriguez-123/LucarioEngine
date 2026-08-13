@@ -19,9 +19,16 @@ RenderPipeline::setRendererType(RendererType rendererType, Device& device) {
 		return hr;
 	}
 
-	ISceneRenderer* candidateRenderer = resolveRenderer(rendererType);
-	if (!candidateRenderer) {
-		return E_FAIL;
+	ISceneRenderer* candidateRenderer = nullptr;
+	switch (rendererType) {
+	case RendererType::Forward:
+		candidateRenderer = &m_forwardRenderer;
+		break;
+	case RendererType::Deferred:
+		candidateRenderer = &m_deferredRenderer;
+		break;
+	default:
+		return E_INVALIDARG;
 	}
 
 	hr = candidateRenderer->resize(device, m_lastWidth, m_lastHeight);
@@ -125,18 +132,44 @@ RenderPipeline::getGBufferEmissiveAlphaSRV() const {
 
 void
 RenderPipeline::setShadowFactorDebugEnabled(bool enabled) {
-	ISceneRenderer* renderer = resolveRenderer(RendererType::Deferred);
-	if (renderer) {
-		renderer->setShadowFactorDebugEnabled(enabled);
-	}
+	m_deferredRenderer.setShadowFactorDebugEnabled(enabled);
 }
 
 void
 RenderPipeline::setDeferredDebugViewMode(int mode) {
-	ISceneRenderer* renderer = resolveRenderer(RendererType::Deferred);
-	if (renderer) {
-		renderer->setDeferredDebugViewMode(mode);
-	}
+	m_deferredRenderer.setDeferredDebugViewMode(mode);
+}
+
+void RenderPipeline::setPostProcessEnabled(bool enabled) {
+	m_deferredRenderer.setPostProcessEnabled(enabled);
+}
+
+void RenderPipeline::setBloomEnabled(bool enabled) {
+	m_deferredRenderer.setBloomEnabled(enabled);
+}
+
+void RenderPipeline::setTonemappingEnabled(bool enabled) {
+	m_deferredRenderer.setTonemappingEnabled(enabled);
+}
+
+void RenderPipeline::setFXAAEnabled(bool enabled) {
+	m_deferredRenderer.setFXAAEnabled(enabled);
+}
+
+void RenderPipeline::setBloomThreshold(float value) {
+	m_deferredRenderer.setBloomThreshold(value);
+}
+
+void RenderPipeline::setBloomIntensity(float value) {
+	m_deferredRenderer.setBloomIntensity(value);
+}
+
+void RenderPipeline::setExposure(float value) {
+	m_deferredRenderer.setExposure(value);
+}
+
+void RenderPipeline::setFXAAStrength(float value) {
+	m_deferredRenderer.setFXAAStrength(value);
 }
 
 HRESULT
@@ -164,29 +197,5 @@ RenderPipeline::ensureRendererInitialized(RendererType rendererType, Device& dev
 		return S_OK;
 	default:
 		return E_INVALIDARG;
-	}
-}
-
-ISceneRenderer*
-RenderPipeline::resolveRenderer(RendererType rendererType) {
-	switch (rendererType) {
-	case RendererType::Forward:
-		return &m_forwardRenderer;
-	case RendererType::Deferred:
-		return &m_deferredRenderer;
-	default:
-		return nullptr;
-	}
-}
-
-const ISceneRenderer*
-RenderPipeline::resolveRenderer(RendererType rendererType) const {
-	switch (rendererType) {
-	case RendererType::Forward:
-		return &m_forwardRenderer;
-	case RendererType::Deferred:
-		return &m_deferredRenderer;
-	default:
-		return nullptr;
 	}
 }

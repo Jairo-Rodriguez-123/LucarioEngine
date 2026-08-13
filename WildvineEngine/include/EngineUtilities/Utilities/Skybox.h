@@ -24,8 +24,14 @@ public:
 	Skybox()  = default;
 	~Skybox() { destroy(); }
 
-	HRESULT 
-	init(Device& device, DeviceContext* deviceContext, Texture& cubemap);
+	HRESULT
+	init(Device& device, DeviceContext* deviceContext, Texture& panorama);
+
+	// Replaces the equirectangular panorama without rebuilding geometry/shaders.
+	void setTexture(Texture& panorama);
+	void setIntensity(float intensity);
+	void setRotationDegrees(float degrees);
+	void setTint(float r, float g, float b);
 	
 	void 
 	update(DeviceContext& deviceContext, Camera& camera);
@@ -45,6 +51,9 @@ private:
 	Texture m_skyboxTexture;
 	Model3D* m_cubeModel = nullptr;
 	EU::TSharedPointer<Actor> m_skybox;
+	float m_intensity = 1.0f;
+	float m_rotationDegrees = 0.0f;
+	XMFLOAT3 m_tint = XMFLOAT3(1.0f, 1.0f, 1.0f);
 
 };
 

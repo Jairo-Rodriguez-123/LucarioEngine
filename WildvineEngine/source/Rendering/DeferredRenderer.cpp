@@ -61,6 +61,11 @@ DeferredRenderer::init(Device& device) {
 		return hr;
 	}
 
+	hr = m_postProcessBuffer.init(device, sizeof(PostProcessData));
+	if (FAILED(hr)) {
+		return hr;
+	}
+
 	hr = m_transparentDepthStencil.init(device,
 		true,
 		D3D11_DEPTH_WRITE_MASK_ZERO,
@@ -105,6 +110,11 @@ DeferredRenderer::init(Device& device) {
 		return hr;
 	}
 
+	hr = createPostProcessResources(device);
+	if (FAILED(hr)) {
+		return hr;
+	}
+
 	hr = createFullScreenQuad(device);
 	if (FAILED(hr)) {
 		return hr;
@@ -133,6 +143,12 @@ DeferredRenderer::resize(Device& device, unsigned int width, unsigned int height
 	hr = createGBufferResources(device, width, height);
 	if (FAILED(hr)) {
 		ERROR("DeferredRenderer", "resize", "Failed to recreate GBuffer resources.");
+		return hr;
+	}
+
+	hr = createPostProcessTarget(device, width, height);
+	if (FAILED(hr)) {
+		ERROR("DeferredRenderer", "resize", "Failed to recreate HDR post-process target.");
 		return hr;
 	}
 
@@ -168,6 +184,16 @@ DeferredRenderer::destroy() {
 	m_fullscreenIndexBuffer.destroy();
 	m_fullscreenVertexBuffer.destroy();
 
+	m_postPongRTV.destroy();
+	m_postPongSRV.destroy();
+	m_postPongTexture.destroy();
+	m_postPingRTV.destroy();
+	m_postPingSRV.destroy();
+	m_postPingTexture.destroy();
+	m_hdrSceneRTV.destroy();
+	m_hdrSceneSRV.destroy();
+	m_hdrSceneTexture.destroy();
+
 	m_gBufferEmissiveAlphaRTV.destroy();
 	m_gBufferEmissiveAlphaSRV.destroy();
 	m_gBufferEmissiveAlphaTexture.destroy();
@@ -183,6 +209,9 @@ DeferredRenderer::destroy() {
 
 	m_fullscreenRasterizer.destroy();
 	m_lightingSampler.destroy();
+	m_fxaaShader.destroy();
+	m_tonemapShader.destroy();
+	m_bloomShader.destroy();
 	m_deferredLightingShader.destroy();
 	m_gBufferShader.destroy();
 
@@ -190,6 +219,7 @@ DeferredRenderer::destroy() {
 	m_disabledDepthStencil.destroy();
 	m_shadowDepthStencil.destroy();
 	m_perMaterialBuffer.destroy();
+	m_postProcessBuffer.destroy();
 	m_lightingDebugBuffer.destroy();
 	m_perObjectBuffer.destroy();
 	m_perFrameBuffer.destroy();
@@ -316,10 +346,37 @@ DeferredRenderer::renderSceneToTarget(DeviceContext& deviceContext,
 	bindGBufferTargets(deviceContext, targetPass.getDSV());
 	renderGeometryPass(deviceContext);
 
-	bindFinalTarget(deviceContext, targetPass.getRTV(), targetPass.getDSV());
+	// Post-processing is reserved for the final deferred scene. Debug views and
+	// the pre-shadow preview stay unmodified so their values remain trustworthy.
+	const bool anyPostEffect =
+		m_postProcessData.BloomEnabled != 0 ||
+		m_postProcessData.TonemappingEnabled != 0 ||
+		m_postProcessData.FXAAEnabled != 0;
+	const bool postProcessThisPass =
+		applyShadows &&
+		m_postProcessData.PostProcessEnabled != 0 &&
+		anyPostEffect &&
+		!m_shadowFactorDebugEnabled &&
+		m_deferredDebugViewMode == 0 &&
+		m_hdrSceneRTV.get() != nullptr &&
+		m_hdrSceneSRV.m_textureFromImg != nullptr;
+
+	if (postProcessThisPass) {
+		const float hdrClear[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+		deviceContext.ClearRenderTargetView(m_hdrSceneRTV.get(), hdrClear);
+		bindFinalTarget(deviceContext, m_hdrSceneRTV.get(), targetPass.getDSV());
+	}
+	else {
+		bindFinalTarget(deviceContext, targetPass.getRTV(), targetPass.getDSV());
+	}
+
 	renderLightingPass(deviceContext);
 	renderSkyboxPass(deviceContext, scene);
 	renderTransparentPass(deviceContext);
+
+	if (postProcessThisPass) {
+		renderPostProcessStack(deviceContext, targetPass.getRTV());
+	}
 }
 
 void
@@ -474,6 +531,76 @@ DeferredRenderer::renderLightingPass(DeviceContext& deviceContext) {
 	deviceContext.DrawIndexed(6, 0, 0);
 
 	clearDeferredSRVs(deviceContext);
+}
+
+void
+DeferredRenderer::drawPostProcessStage(DeviceContext& deviceContext,
+	ShaderProgram& shader,
+	ID3D11ShaderResourceView* source,
+	ID3D11RenderTargetView* target) {
+	if (!source || !target || !shader.m_PixelShader) return;
+
+	clearDeferredSRVs(deviceContext);
+	ID3D11RenderTargetView* targets[1] = { target };
+	deviceContext.OMSetRenderTargets(1, targets, nullptr);
+	deviceContext.OMSetBlendState(m_opaqueBlendState, m_blendFactor, 0xffffffff);
+	m_disabledDepthStencil.render(deviceContext, 0, false);
+	m_fullscreenRasterizer.render(deviceContext);
+	m_lightingSampler.render(deviceContext, 0, 1);
+
+	m_postProcessBuffer.update(deviceContext, nullptr, 0, nullptr, &m_postProcessData, 0, 0);
+	m_postProcessBuffer.render(deviceContext, 0, 1, true);
+
+	ID3D11ShaderResourceView* sourceViews[1] = { source };
+	deviceContext.PSSetShaderResources(0, 1, sourceViews);
+	shader.render(deviceContext);
+	deviceContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	m_fullscreenVertexBuffer.render(deviceContext, 0, 1);
+	m_fullscreenIndexBuffer.render(deviceContext, 0, 1, false, DXGI_FORMAT_R32_UINT);
+	deviceContext.DrawIndexed(6, 0, 0);
+
+	ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
+	deviceContext.PSSetShaderResources(0, 1, nullSRV);
+}
+
+void
+DeferredRenderer::renderPostProcessStack(DeviceContext& deviceContext, ID3D11RenderTargetView* finalRenderTarget) {
+	if (!finalRenderTarget || !m_hdrSceneSRV.m_textureFromImg) return;
+
+	m_postProcessData.InverseResolution = XMFLOAT2(
+		1.0f / static_cast<float>((std::max)(1u, m_renderWidth)),
+		1.0f / static_cast<float>((std::max)(1u, m_renderHeight)));
+	m_postProcessData.Exposure = (std::max)(0.01f, m_postProcessData.Exposure);
+	m_postProcessData.BloomThreshold = (std::max)(0.0f, m_postProcessData.BloomThreshold);
+	m_postProcessData.BloomIntensity = (std::max)(0.0f, m_postProcessData.BloomIntensity);
+	m_postProcessData.FXAAStrength = (std::max)(0.0f, m_postProcessData.FXAAStrength);
+
+	struct Stage {
+		ShaderProgram* shader = nullptr;
+	};
+	Stage stages[3]{};
+	int stageCount = 0;
+	if (m_postProcessData.BloomEnabled != 0) stages[stageCount++].shader = &m_bloomShader;
+	if (m_postProcessData.TonemappingEnabled != 0) stages[stageCount++].shader = &m_tonemapShader;
+	if (m_postProcessData.FXAAEnabled != 0) stages[stageCount++].shader = &m_fxaaShader;
+	if (stageCount <= 0) return;
+
+	ID3D11ShaderResourceView* source = m_hdrSceneSRV.m_textureFromImg;
+	bool usePing = true;
+	for (int stageIndex = 0; stageIndex < stageCount; ++stageIndex) {
+		const bool lastStage = stageIndex == stageCount - 1;
+		ID3D11RenderTargetView* target = finalRenderTarget;
+		if (!lastStage) {
+			target = usePing ? m_postPingRTV.get() : m_postPongRTV.get();
+		}
+
+		drawPostProcessStage(deviceContext, *stages[stageIndex].shader, source, target);
+
+		if (!lastStage) {
+			source = usePing ? m_postPingSRV.m_textureFromImg : m_postPongSRV.m_textureFromImg;
+			usePing = !usePing;
+		}
+	}
 }
 
 void
@@ -822,6 +949,51 @@ DeferredRenderer::createLightingResources(Device& device) {
 	}
 
 	return m_fullscreenRasterizer.init(device, D3D11_FILL_SOLID, D3D11_CULL_NONE, false, false);
+}
+
+HRESULT
+DeferredRenderer::createPostProcessResources(Device& device) {
+	LayoutBuilder fullscreenBuilder;
+	fullscreenBuilder.Add("POSITION", DXGI_FORMAT_R32G32B32_FLOAT)
+		.Add("NORMAL", DXGI_FORMAT_R32G32B32_FLOAT)
+		.Add("TANGENT", DXGI_FORMAT_R32G32B32_FLOAT)
+		.Add("BITANGENT", DXGI_FORMAT_R32G32B32_FLOAT)
+		.Add("TEXCOORD", DXGI_FORMAT_R32G32_FLOAT);
+
+	HRESULT hr = m_bloomShader.init(device, "BloomPass.hlsl", fullscreenBuilder);
+	if (FAILED(hr)) return hr;
+	hr = m_tonemapShader.init(device, "TonemapPass.hlsl", fullscreenBuilder);
+	if (FAILED(hr)) return hr;
+	hr = m_fxaaShader.init(device, "FXAAPass.hlsl", fullscreenBuilder);
+	if (FAILED(hr)) return hr;
+
+	return createPostProcessTarget(device, m_renderWidth, m_renderHeight);
+}
+
+HRESULT
+DeferredRenderer::createPostProcessTarget(Device& device, unsigned int width, unsigned int height) {
+	Texture hdrTexture, hdrSRV, pingTexture, pingSRV, pongTexture, pongSRV;
+	RenderTargetView hdrRTV, pingRTV, pongRTV;
+	const unsigned int safeWidth = (std::max)(1u, width);
+	const unsigned int safeHeight = (std::max)(1u, height);
+
+	HRESULT hr = createGBufferTarget(device, safeWidth, safeHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, hdrTexture, hdrSRV, hdrRTV);
+	if (FAILED(hr)) return hr;
+	hr = createGBufferTarget(device, safeWidth, safeHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, pingTexture, pingSRV, pingRTV);
+	if (FAILED(hr)) return hr;
+	hr = createGBufferTarget(device, safeWidth, safeHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, pongTexture, pongSRV, pongRTV);
+	if (FAILED(hr)) return hr;
+
+	m_hdrSceneTexture = std::move(hdrTexture);
+	m_hdrSceneSRV = std::move(hdrSRV);
+	m_hdrSceneRTV = std::move(hdrRTV);
+	m_postPingTexture = std::move(pingTexture);
+	m_postPingSRV = std::move(pingSRV);
+	m_postPingRTV = std::move(pingRTV);
+	m_postPongTexture = std::move(pongTexture);
+	m_postPongSRV = std::move(pongSRV);
+	m_postPongRTV = std::move(pongRTV);
+	return S_OK;
 }
 
 HRESULT

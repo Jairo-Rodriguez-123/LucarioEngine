@@ -16,6 +16,7 @@
 #include <shellapi.h>
 #include <functional>
 #include <cstdio>
+#include <cstring>
 
 #if defined(_MSC_VER)
 #pragma comment(lib, "Comdlg32.lib")
@@ -23,7 +24,8 @@
 #endif
 
 namespace {
-	constexpr int kCurrentSceneVersion = 5;
+	constexpr int kCurrentSceneVersion = 6;
+	constexpr const char* kDefaultSkyboxPath = "Assets/Skyboxes/Wildvine_Dusk.png";
 	constexpr size_t kMaxSerializedActors = 10000;
 	constexpr size_t kMaxSerializedMaterialsPerActor = 1024;
 
@@ -1057,36 +1059,11 @@ BaseApp::init() {
 		return hr;
 	}
 
-	// Optional external resources. The editor must still start when these files
-	// are absent; demo geometry below is generated entirely in memory.
-	std::array<std::string, 6> requestedFaces = {
-		"Skybox/cubemap_0.png",
-		"Skybox/cubemap_1.png",
-		"Skybox/cubemap_2.png",
-		"Skybox/cubemap_3.png",
-		"Skybox/cubemap_4.png",
-		"Skybox/cubemap_5.png"
-	};
-	std::array<std::string, 6> resolvedFaces{};
-	bool hasAllSkyboxFaces = true;
-	for (size_t i = 0; i < requestedFaces.size(); ++i) {
-		if (!resolveOptionalAssetPath(requestedFaces[i], resolvedFaces[i])) {
-			hasAllSkyboxFaces = false;
-			break;
-		}
-	}
-
+	// Optional panoramic skybox. V17 uses one equirectangular 2:1 image instead
+	// of six cubemap faces. A missing image never prevents the editor from starting.
 	m_skyboxReady = false;
-	if (hasAllSkyboxFaces) {
-		hr = m_skyboxTex.CreateCubemap(m_device, m_deviceContext, resolvedFaces, false);
-		if (FAILED(hr)) {
-			MESSAGE("Main", "InitDevice", "Optional skybox could not be created. Continuing without skybox.");
-			hr = S_OK;
-		}
-	}
-	else {
-		MESSAGE("Main", "InitDevice", "No skybox files found. Using the editor clear color instead.");
-	}
+	m_skyboxTexturePath.clear();
+	resetSkyboxToDefault();
 
 	std::string lightIconPath;
 	if (resolveOptionalAssetPath("slate/icons/light-bulb.png", lightIconPath)) {
@@ -1131,18 +1108,6 @@ BaseApp::init() {
 	m_constantBufferStruct.LightColor = EU::Vector3(1.0f, 1.0f, 1.0f);
 	m_constantBufferStruct.LightDir = EU::Vector3(-0.35f, -1.0f, 0.35f);
 
-	// Initialize the optional skybox only after a valid cubemap exists.
-	if (m_skyboxTex.m_textureFromImg) {
-		hr = m_skybox.init(m_device, &m_deviceContext, m_skyboxTex);
-		if (FAILED(hr)) {
-			MESSAGE("Main", "InitDevice", "Skybox resources failed. Continuing without skybox.");
-			m_skyboxReady = false;
-			hr = S_OK;
-		}
-		else {
-			m_skyboxReady = true;
-		}
-	}
 
 	// Default pipeline states.
 	hr = m_defaultRasterizer.init(m_device, D3D11_FILL_SOLID, D3D11_CULL_NONE, false, true);
@@ -1314,6 +1279,8 @@ BaseApp::init() {
 	refreshAssetBrowserCatalog(true);
 
 	m_d3dReady = true;
+	resetSceneHistory("Initial Scene");
+	m_gui.setHistoryAvailability(canUndoSceneHistory(), canRedoSceneHistory());
 	return S_OK;
 }
 
@@ -1336,6 +1303,8 @@ BaseApp::update(float deltaTime) {
 	// Texture replacement requests are executed before the new ImGui frame.
 	// This keeps the previous frame's SRV pointers alive until ImGui is done with them.
 	handlePendingMaterialTextureEdit();
+	// Skybox texture replacement is deferred for the same SRV lifetime reason.
+	handlePendingSkyboxEdit();
 	updateAssetBrowserCatalog(deltaTime);
 
 	// Update our time
@@ -1353,12 +1322,14 @@ BaseApp::update(float deltaTime) {
 		t = (dwTimeCur - dwTimeStart) / 1000.0f;
 	}
 	// Update User Interface
+	m_gui.setHistoryAvailability(canUndoSceneHistory(), canRedoSceneHistory());
 	m_gui.update(m_viewport, m_window);
 	m_camera.updateViewMatrix();
 	if (m_gui.consumeCreateLightActorRequest()) {
 		EU::TSharedPointer<Actor> lightActor = createLightActor();
 		if (!lightActor.isNull()) {
 			m_gui.selectedActorIndex = static_cast<int>(m_actors.size()) - 1;
+			commitSceneHistory("Create Light");
 		}
 	}
 	if (m_gui.consumeImportMeshRequest()) {
@@ -1380,6 +1351,14 @@ BaseApp::update(float deltaTime) {
 		selectedActor);
 	m_renderPipeline.setShadowFactorDebugEnabled(m_gui.m_visualizeDeferredShadowFactor);
 	m_renderPipeline.setDeferredDebugViewMode(m_gui.m_deferredDebugViewMode);
+	m_renderPipeline.setPostProcessEnabled(m_gui.m_postProcessEnabled);
+	m_renderPipeline.setBloomEnabled(m_gui.m_bloomEnabled);
+	m_renderPipeline.setTonemappingEnabled(m_gui.m_tonemappingEnabled);
+	m_renderPipeline.setFXAAEnabled(m_gui.m_fxaaEnabled);
+	m_renderPipeline.setBloomThreshold(m_gui.m_bloomThreshold);
+	m_renderPipeline.setBloomIntensity(m_gui.m_bloomIntensity);
+	m_renderPipeline.setExposure(m_gui.m_postExposure);
+	m_renderPipeline.setFXAAStrength(m_gui.m_fxaaStrength);
 	m_gui.outliner(m_actors);
 	if (m_gui.selectedActorIndex >= 0 &&
 		m_gui.selectedActorIndex < static_cast<int>(m_actors.size())) {
@@ -1388,6 +1367,11 @@ BaseApp::update(float deltaTime) {
 	m_gui.inspectorGeneral(selectedActor);
 	m_gui.drawMaterialEditor(selectedActor);
 	m_gui.drawAssetBrowser(m_assetBrowserItems, selectedActor);
+	std::string historyCommitLabel;
+	if (m_gui.consumeHistoryCommitRequest(historyCommitLabel)) {
+		commitSceneHistory(historyCommitLabel);
+	}
+	m_gui.setHistoryAvailability(canUndoSceneHistory(), canRedoSceneHistory());
 	if (m_gui.consumeSaveSceneRequest()) {
 		if (m_currentScenePath.empty()) {
 			saveSceneAsFromDialog();
@@ -1436,8 +1420,11 @@ BaseApp::update(float deltaTime) {
 	XMStoreFloat4x4(&m_constantBufferStruct.Projection, XMMatrixTranspose(m_camera.getProj()));
 	m_constantBufferStruct.CameraPos = m_camera.getPosition();
 
-	// Update Skybox Pass solo si el recurso se inicializo correctamente.
+	// Update panoramic skybox parameters and camera-relative transform.
 	if (m_skyboxReady) {
+		m_skybox.setIntensity(m_gui.m_skyboxIntensity);
+		m_skybox.setRotationDegrees(m_gui.m_skyboxRotationDegrees);
+		m_skybox.setTint(m_gui.m_skyboxTint[0], m_gui.m_skyboxTint[1], m_gui.m_skyboxTint[2]);
 		m_skybox.update(m_deviceContext, m_camera);
 	}
 
@@ -1459,7 +1446,7 @@ BaseApp::render() {
 
 	m_renderScene.clear();
 	m_sceneGraph.gatherRenderScene(m_renderScene, m_camera);
-	m_renderScene.skybox = m_skyboxReady ? &m_skybox : nullptr;
+	m_renderScene.skybox = (m_skyboxReady && m_gui.m_skyboxEnabled) ? &m_skybox : nullptr;
 	m_renderPipeline.render(
 		m_deviceContext,
 		m_camera,
@@ -1480,6 +1467,7 @@ BaseApp::render() {
 
 void
 BaseApp::destroy() {
+	cleanupSceneHistory();
 	m_d3dReady = false;
 	if (m_deviceContext.m_deviceContext) {
 		m_deviceContext.m_deviceContext->ClearState();
@@ -1919,6 +1907,9 @@ void BaseApp::handlePendingAssetBrowserAction()
 		if (!applyMaterialTextureOverride(actor, request.materialSlot, request.channel, request.path)) {
 			ERROR("Main", "AssetBrowser", "Could not apply the selected texture to the selected material.");
 		}
+		else {
+			commitSceneHistory("Apply Texture");
+		}
 		break;
 	}
 
@@ -2086,7 +2077,9 @@ void BaseApp::handlePendingMaterialTextureEdit()
 	if (actor.isNull()) return;
 
 	if (request.clear) {
-		clearMaterialTextureOverride(actor, request.materialSlot, request.channel);
+		if (clearMaterialTextureOverride(actor, request.materialSlot, request.channel)) {
+			commitSceneHistory("Reset Material Texture");
+		}
 		return;
 	}
 
@@ -2117,7 +2110,159 @@ void BaseApp::handlePendingMaterialTextureEdit()
 		return;
 	}
 
-	applyMaterialTextureOverride(actor, request.materialSlot, request.channel, projectTexturePath.string());
+	if (applyMaterialTextureOverride(actor, request.materialSlot, request.channel, projectTexturePath.string())) {
+		commitSceneHistory("Replace Material Texture");
+	}
+}
+
+
+bool BaseApp::loadPanoramicSkybox(const std::string& path)
+{
+	if (path.empty()) return false;
+
+	std::filesystem::path resolvedPath;
+	if (!resolveMaterialOverrideTexturePath(path, resolvedPath)) {
+		const std::wstring pathW(path.begin(), path.end());
+		MESSAGE("Main", "Skybox", L"Panoramic skybox texture was not found: " << pathW);
+		return false;
+	}
+
+	const std::string extension = lowerAscii(resolvedPath.extension().string());
+	if (extension == ".dds") {
+		ERROR("Main", "Skybox", "DDS panoramas are not supported by the current image loader. Use PNG/JPG/TGA/BMP.");
+		return false;
+	}
+
+	Texture loadedTexture;
+	const ExtensionType extensionType = (extension == ".jpg" || extension == ".jpeg") ? JPG : PNG;
+	HRESULT hr = loadedTexture.init(m_device, resolvedPath.string(), extensionType);
+	if (FAILED(hr) || !loadedTexture.m_texture || !loadedTexture.m_textureFromImg) {
+		ERROR("Main", "Skybox", "Failed to load panoramic skybox texture.");
+		return false;
+	}
+
+	D3D11_TEXTURE2D_DESC desc{};
+	loadedTexture.m_texture->GetDesc(&desc);
+	if (desc.Height == 0) return false;
+	const float aspect = static_cast<float>(desc.Width) / static_cast<float>(desc.Height);
+	if (!std::isfinite(aspect) || aspect < 1.75f || aspect > 2.25f) {
+		ERROR("Main", "Skybox", "Panoramic skybox should use an equirectangular 2:1 image (width approximately twice height).");
+		return false;
+	}
+
+	if (!m_skyboxReady) {
+		hr = m_skybox.init(m_device, &m_deviceContext, loadedTexture);
+		if (FAILED(hr)) {
+			ERROR("Main", "Skybox", "Failed to initialize panoramic skybox render resources.");
+			return false;
+		}
+		m_skyboxReady = true;
+	}
+	else {
+		m_skybox.setTexture(loadedTexture);
+	}
+
+	m_skyboxTex = std::move(loadedTexture);
+	m_skyboxTexturePath = makePortableAssetPath(resolvedPath);
+	m_gui.setSkyboxTextureDisplayName(resolvedPath.filename().string());
+	m_skybox.setIntensity(m_gui.m_skyboxIntensity);
+	m_skybox.setRotationDegrees(m_gui.m_skyboxRotationDegrees);
+	m_skybox.setTint(m_gui.m_skyboxTint[0], m_gui.m_skyboxTint[1], m_gui.m_skyboxTint[2]);
+
+	const std::wstring pathW(resolvedPath.wstring());
+	MESSAGE("Main", "Skybox", L"Loaded panoramic skybox: " << pathW);
+	return true;
+}
+
+bool BaseApp::copySkyboxTextureIntoProject(const std::string& sourcePath, std::string& outPortablePath)
+{
+	namespace fs = std::filesystem;
+	outPortablePath.clear();
+	const fs::path source(sourcePath);
+	if (!isSupportedMaterialTextureFile(source)) return false;
+
+	const std::string extension = lowerAscii(source.extension().string());
+	if (extension == ".dds") return false;
+
+	std::error_code ec;
+	const fs::path skyboxDirectory = findProjectRoot() / "Assets" / "Skyboxes";
+	fs::create_directories(skyboxDirectory, ec);
+	if (ec) return false;
+
+	const fs::path destination = (skyboxDirectory / source.filename()).lexically_normal();
+	fs::path sourceAbsolute = fs::absolute(source, ec).lexically_normal();
+	ec.clear();
+	fs::path destinationAbsolute = fs::absolute(destination, ec).lexically_normal();
+	if (sourceAbsolute != destinationAbsolute) {
+		ec.clear();
+		fs::copy_file(source, destination, fs::copy_options::overwrite_existing, ec);
+		if (ec) return false;
+	}
+
+	outPortablePath = makePortableAssetPath(destination);
+	return !outPortablePath.empty();
+}
+
+void BaseApp::resetSkyboxToDefault()
+{
+	m_gui.m_skyboxEnabled = true;
+	m_gui.m_skyboxIntensity = 1.0f;
+	m_gui.m_skyboxRotationDegrees = 0.0f;
+	m_gui.m_skyboxTint[0] = 1.0f;
+	m_gui.m_skyboxTint[1] = 1.0f;
+	m_gui.m_skyboxTint[2] = 1.0f;
+
+	if (!loadPanoramicSkybox(kDefaultSkyboxPath)) {
+		m_skybox.destroy();
+		m_skyboxTex.destroy();
+		m_skyboxReady = false;
+		m_skyboxTexturePath.clear();
+		m_gui.setSkyboxTextureDisplayName("None");
+		MESSAGE("Main", "Skybox", "Default panoramic skybox is unavailable. Continuing with editor clear color.");
+	}
+}
+
+void BaseApp::handlePendingSkyboxEdit()
+{
+	SkyboxEditorRequest request{};
+	if (!m_gui.consumeSkyboxEditorRequest(request)) return;
+
+	if (request.action == SkyboxEditorAction::ResetDefault) {
+		resetSkyboxToDefault();
+		commitSceneHistory("Reset Skybox");
+		return;
+	}
+	if (request.action != SkyboxEditorAction::BrowseTexture) return;
+
+	char fileName[32768] = {};
+	OPENFILENAMEA dialog{};
+	dialog.lStructSize = sizeof(dialog);
+	dialog.hwndOwner = m_window.m_hWnd;
+	dialog.lpstrFilter =
+		"Panoramic images (*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0"
+		"PNG (*.png)\0*.png\0JPEG (*.jpg;*.jpeg)\0*.jpg;*.jpeg\0TGA (*.tga)\0*.tga\0BMP (*.bmp)\0*.bmp\0\0";
+	dialog.lpstrFile = fileName;
+	dialog.nMaxFile = static_cast<DWORD>(sizeof(fileName));
+	dialog.lpstrTitle = "Select 2:1 Panoramic Skybox";
+	dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+
+	if (!GetOpenFileNameA(&dialog)) {
+		const DWORD errorCode = CommDlgExtendedError();
+		if (errorCode != 0) {
+			ERROR("Main", "Skybox", ("Windows skybox file dialog failed. Code: " + std::to_string(errorCode)).c_str());
+		}
+		return;
+	}
+
+	std::string portablePath;
+	if (!copySkyboxTextureIntoProject(fileName, portablePath)) {
+		ERROR("Main", "Skybox", "Could not copy the selected panorama into Assets/Skyboxes.");
+		return;
+	}
+	if (loadPanoramicSkybox(portablePath)) {
+		m_gui.m_skyboxEnabled = true;
+		commitSceneHistory("Change Skybox");
+	}
 }
 
 const BaseApp::ImportedMeshAsset* BaseApp::findImportedMeshAsset(const Actor* actor) const
@@ -2362,6 +2507,9 @@ bool BaseApp::importOBJModel(const std::string& path)
 
 	const std::wstring pathW(resolvedPath.wstring());
 	MESSAGE("Main", "importOBJModel", L"Imported OBJ successfully: " << pathW);
+	if (!m_historyRestoreInProgress && !m_historyCaptureInProgress) {
+		commitSceneHistory("Import OBJ");
+	}
 	return true;
 }
 
@@ -2771,6 +2919,7 @@ void BaseApp::createNewScene()
 {
 	clearCurrentSceneActors();
 	m_currentScenePath.clear();
+	resetSkyboxToDefault();
 
 	EU::TSharedPointer<Actor> lightActor = createLightActor("Light Actor 1");
 	if (!lightActor.isNull()) {
@@ -2800,6 +2949,203 @@ bool BaseApp::isValidSceneFileHeader(const std::string& path) const
 		magic == "WVSCENE" &&
 		version >= 1 &&
 		version <= kCurrentSceneVersion;
+}
+
+
+bool BaseApp::canUndoSceneHistory() const
+{
+	return !m_sceneHistory.empty() && m_sceneHistoryCursor > 0 && m_sceneHistoryCursor < m_sceneHistory.size();
+}
+
+bool BaseApp::canRedoSceneHistory() const
+{
+	return !m_sceneHistory.empty() && (m_sceneHistoryCursor + 1) < m_sceneHistory.size();
+}
+
+void BaseApp::cleanupSceneHistory()
+{
+	std::error_code ec;
+	if (!m_sceneHistoryDirectory.empty()) {
+		std::filesystem::remove_all(std::filesystem::path(m_sceneHistoryDirectory), ec);
+	}
+	m_sceneHistory.clear();
+	m_sceneHistoryCursor = 0;
+	m_sceneHistorySequence = 0;
+	m_sceneHistoryDirectory.clear();
+}
+
+bool BaseApp::captureSceneHistorySnapshot(const std::string& label, SceneHistorySnapshot& outSnapshot)
+{
+	if (m_historyCaptureInProgress || m_historyRestoreInProgress) return false;
+
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	if (m_sceneHistoryDirectory.empty()) {
+		fs::path root = fs::temp_directory_path(ec);
+		if (ec) {
+			ec.clear();
+			root = fs::path("intermediate");
+		}
+		root /= "WildvineEngineHistory";
+		root /= std::to_string(static_cast<unsigned long long>(GetCurrentProcessId()));
+		fs::create_directories(root, ec);
+		if (ec) return false;
+		m_sceneHistoryDirectory = root.string();
+	}
+
+	fs::path snapshotPath(m_sceneHistoryDirectory);
+	char fileName[64] = {};
+	sprintf_s(fileName, "snapshot_%06llu.wvscene", ++m_sceneHistorySequence);
+	snapshotPath /= fileName;
+
+	const std::string activeScenePath = m_currentScenePath;
+	m_historyCaptureInProgress = true;
+	const bool saved = saveScene(snapshotPath.string());
+	m_historyCaptureInProgress = false;
+	m_currentScenePath = activeScenePath;
+	if (!saved) {
+		fs::remove(snapshotPath, ec);
+		return false;
+	}
+
+	outSnapshot.snapshotPath = snapshotPath.string();
+	outSnapshot.scenePath = activeScenePath;
+	outSnapshot.label = label.empty() ? "Edit" : label;
+	outSnapshot.selectedActorIndex = m_gui.selectedActorIndex;
+	return true;
+}
+
+void BaseApp::trimSceneHistory()
+{
+	constexpr size_t kMaxHistoryStates = 40;
+	std::error_code ec;
+	while (m_sceneHistory.size() > kMaxHistoryStates) {
+		if (!m_sceneHistory.front().snapshotPath.empty()) {
+			std::filesystem::remove(m_sceneHistory.front().snapshotPath, ec);
+			ec.clear();
+		}
+		m_sceneHistory.erase(m_sceneHistory.begin());
+		if (m_sceneHistoryCursor > 0) --m_sceneHistoryCursor;
+	}
+}
+
+void BaseApp::resetSceneHistory(const std::string& label)
+{
+	cleanupSceneHistory();
+	SceneHistorySnapshot initial{};
+	if (captureSceneHistorySnapshot(label, initial)) {
+		m_sceneHistory.push_back(std::move(initial));
+		m_sceneHistoryCursor = 0;
+	}
+	m_gui.setHistoryAvailability(canUndoSceneHistory(), canRedoSceneHistory());
+}
+
+void BaseApp::commitSceneHistory(const std::string& label)
+{
+	if (m_historyCaptureInProgress || m_historyRestoreInProgress) return;
+
+	SceneHistorySnapshot snapshot{};
+	if (!captureSceneHistorySnapshot(label, snapshot)) return;
+
+	// Evitar snapshots duplicados (por ejemplo un slider que se activa pero vuelve
+	// exactamente a su valor anterior antes de soltar el mouse).
+	auto filesEqual = [](const std::string& a, const std::string& b) -> bool {
+		if (a.empty() || b.empty()) return false;
+		std::error_code ec;
+		const auto sizeA = std::filesystem::file_size(a, ec);
+		if (ec) return false;
+		ec.clear();
+		const auto sizeB = std::filesystem::file_size(b, ec);
+		if (ec || sizeA != sizeB) return false;
+		std::ifstream fa(a, std::ios::binary);
+		std::ifstream fb(b, std::ios::binary);
+		if (!fa || !fb) return false;
+		constexpr size_t kBufferSize = 4096;
+		char ba[kBufferSize] = {};
+		char bb[kBufferSize] = {};
+		while (fa && fb) {
+			fa.read(ba, static_cast<std::streamsize>(kBufferSize));
+			fb.read(bb, static_cast<std::streamsize>(kBufferSize));
+			const std::streamsize ca = fa.gcount();
+			const std::streamsize cb = fb.gcount();
+			if (ca != cb || std::memcmp(ba, bb, static_cast<size_t>(ca)) != 0) return false;
+		}
+		return true;
+	};
+
+	if (!m_sceneHistory.empty() && m_sceneHistoryCursor < m_sceneHistory.size() &&
+		filesEqual(m_sceneHistory[m_sceneHistoryCursor].snapshotPath, snapshot.snapshotPath)) {
+		std::error_code ec;
+		std::filesystem::remove(snapshot.snapshotPath, ec);
+		return;
+	}
+
+	// Una edicion nueva despues de Undo invalida la rama de Redo.
+	if (!m_sceneHistory.empty() && (m_sceneHistoryCursor + 1) < m_sceneHistory.size()) {
+		std::error_code ec;
+		for (size_t i = m_sceneHistoryCursor + 1; i < m_sceneHistory.size(); ++i) {
+			std::filesystem::remove(m_sceneHistory[i].snapshotPath, ec);
+			ec.clear();
+		}
+		m_sceneHistory.erase(m_sceneHistory.begin() + static_cast<std::ptrdiff_t>(m_sceneHistoryCursor + 1), m_sceneHistory.end());
+	}
+
+	m_sceneHistory.push_back(std::move(snapshot));
+	m_sceneHistoryCursor = m_sceneHistory.size() - 1;
+	trimSceneHistory();
+	m_gui.setHistoryAvailability(canUndoSceneHistory(), canRedoSceneHistory());
+}
+
+bool BaseApp::restoreSceneHistorySnapshot(size_t historyIndex)
+{
+	if (historyIndex >= m_sceneHistory.size()) return false;
+	const SceneHistorySnapshot snapshot = m_sceneHistory[historyIndex];
+	if (snapshot.snapshotPath.empty() || !isValidSceneFileHeader(snapshot.snapshotPath)) return false;
+
+	m_historyRestoreInProgress = true;
+	clearCurrentSceneActors();
+	const bool loaded = loadScene(snapshot.snapshotPath);
+	m_historyRestoreInProgress = false;
+	if (!loaded) {
+		ERROR("Main", "History", "Failed to restore an Undo/Redo snapshot.");
+		return false;
+	}
+
+	m_currentScenePath = snapshot.scenePath;
+	if (m_actors.empty() || snapshot.selectedActorIndex < 0) {
+		m_gui.selectedActorIndex = -1;
+	}
+	else {
+		m_gui.selectedActorIndex = (std::max)(0, (std::min)(snapshot.selectedActorIndex,
+			static_cast<int>(m_actors.size()) - 1));
+	}
+	return true;
+}
+
+bool BaseApp::undoSceneHistory()
+{
+	if (!canUndoSceneHistory()) return false;
+	const size_t target = m_sceneHistoryCursor - 1;
+	if (!restoreSceneHistorySnapshot(target)) return false;
+	m_sceneHistoryCursor = target;
+	const std::string label = m_sceneHistory[m_sceneHistoryCursor + 1].label;
+	const std::wstring labelW(label.begin(), label.end());
+	MESSAGE("Main", "Undo", L"Undo: " << labelW);
+	m_gui.setHistoryAvailability(canUndoSceneHistory(), canRedoSceneHistory());
+	return true;
+}
+
+bool BaseApp::redoSceneHistory()
+{
+	if (!canRedoSceneHistory()) return false;
+	const size_t target = m_sceneHistoryCursor + 1;
+	if (!restoreSceneHistorySnapshot(target)) return false;
+	m_sceneHistoryCursor = target;
+	const std::string label = m_sceneHistory[m_sceneHistoryCursor].label;
+	const std::wstring labelW(label.begin(), label.end());
+	MESSAGE("Main", "Redo", L"Redo: " << labelW);
+	m_gui.setHistoryAvailability(canUndoSceneHistory(), canRedoSceneHistory());
+	return true;
 }
 
 bool BaseApp::openSceneFromDialog()
@@ -2893,25 +3239,33 @@ void BaseApp::handlePendingSceneEditorAction()
 	switch (request.action) {
 	case SceneEditorAction::NewScene:
 		createNewScene();
+		commitSceneHistory("New Scene");
 		break;
 	case SceneEditorAction::OpenScene:
-		openSceneFromDialog();
+		if (openSceneFromDialog()) resetSceneHistory("Open Scene");
 		break;
 	case SceneEditorAction::SaveSceneAs:
 		saveSceneAsFromDialog();
 		break;
 	case SceneEditorAction::DuplicateActor:
-		duplicateActorAtIndex(request.actorIndex);
+		if (duplicateActorAtIndex(request.actorIndex)) commitSceneHistory("Duplicate Actor");
 		break;
 	case SceneEditorAction::DeleteActor:
-		deleteActorAtIndex(request.actorIndex);
+		if (deleteActorAtIndex(request.actorIndex)) commitSceneHistory("Delete Actor");
 		break;
 	case SceneEditorAction::RenameActor:
-		renameActorAtIndex(request.actorIndex, request.text);
+		if (renameActorAtIndex(request.actorIndex, request.text)) commitSceneHistory("Rename Actor");
+		break;
+	case SceneEditorAction::Undo:
+		undoSceneHistory();
+		break;
+	case SceneEditorAction::Redo:
+		redoSceneHistory();
 		break;
 	default:
 		break;
 	}
+	m_gui.setHistoryAvailability(canUndoSceneHistory(), canRedoSceneHistory());
 }
 
 bool BaseApp::saveScene(const std::string& path)
@@ -2939,6 +3293,14 @@ bool BaseApp::saveScene(const std::string& path)
 	}
 
 	stream << "WVSCENE " << kCurrentSceneVersion << "\n";
+	stream << "SKYBOX "
+		<< (m_gui.m_skyboxEnabled ? 1 : 0) << " "
+		<< std::quoted(m_skyboxTexturePath) << " "
+		<< m_gui.m_skyboxIntensity << " "
+		<< m_gui.m_skyboxRotationDegrees << " "
+		<< m_gui.m_skyboxTint[0] << " "
+		<< m_gui.m_skyboxTint[1] << " "
+		<< m_gui.m_skyboxTint[2] << "\n";
 	stream << "ACTOR_COUNT " << m_actors.size() << "\n";
 
 	for (size_t actorIndex = 0; actorIndex < m_actors.size(); ++actorIndex) {
@@ -3059,8 +3421,14 @@ bool BaseApp::saveScene(const std::string& path)
 	}
 
 	m_currentScenePath = path;
-	const std::wstring pathW(path.begin(), path.end());
-	MESSAGE("Main", "saveScene", L"Saved scene to '" << pathW << L"'");
+	if (!m_historyCaptureInProgress && !m_historyRestoreInProgress &&
+		!m_sceneHistory.empty() && m_sceneHistoryCursor < m_sceneHistory.size()) {
+		m_sceneHistory[m_sceneHistoryCursor].scenePath = path;
+	}
+	if (!m_historyCaptureInProgress) {
+		const std::wstring pathW(path.begin(), path.end());
+		MESSAGE("Main", "saveScene", L"Saved scene to '" << pathW << L"'");
+	}
 	return true;
 }
 
@@ -3084,6 +3452,9 @@ bool BaseApp::loadScene(const std::string& path)
 	if (!(stream >> version) || version < 1 || version > kCurrentSceneVersion) {
 		return false;
 	}
+	if (version < 6) {
+		resetSkyboxToDefault();
+	}
 
 	size_t declaredActorCount = 0;
 	bool hasDeclaredActorCount = false;
@@ -3091,7 +3462,28 @@ bool BaseApp::loadScene(const std::string& path)
 	EU::TSharedPointer<Actor> currentActor;
 
 	while (stream >> token) {
-		if (token == "ACTOR_COUNT") {
+		if (token == "SKYBOX") {
+			int enabled = 1;
+			std::string texturePath;
+			float intensity = 1.0f;
+			float rotation = 0.0f;
+			float tintR = 1.0f, tintG = 1.0f, tintB = 1.0f;
+			if (!(stream >> enabled >> std::quoted(texturePath) >> intensity >> rotation >> tintR >> tintG >> tintB) ||
+				!isFinite(intensity) || !isFinite(rotation) ||
+				!isFinite(tintR) || !isFinite(tintG) || !isFinite(tintB)) {
+				return false;
+			}
+			m_gui.m_skyboxEnabled = enabled != 0;
+			m_gui.m_skyboxIntensity = (std::max)(0.0f, intensity);
+			m_gui.m_skyboxRotationDegrees = rotation;
+			m_gui.m_skyboxTint[0] = (std::max)(0.0f, tintR);
+			m_gui.m_skyboxTint[1] = (std::max)(0.0f, tintG);
+			m_gui.m_skyboxTint[2] = (std::max)(0.0f, tintB);
+			if (!texturePath.empty() && !loadPanoramicSkybox(texturePath)) {
+				MESSAGE("Main", "loadScene", "Serialized skybox texture is unavailable. Keeping the current/default panorama.");
+			}
+		}
+		else if (token == "ACTOR_COUNT") {
 			if (!(stream >> declaredActorCount) || declaredActorCount > kMaxSerializedActors) {
 				return false;
 			}
@@ -3382,8 +3774,10 @@ bool BaseApp::loadScene(const std::string& path)
 	}
 
 	m_currentScenePath = path;
-	const std::wstring pathW(path.begin(), path.end());
-	MESSAGE("Main", "loadScene", L"Loaded scene from '" << pathW << L"'");
+	if (!m_historyRestoreInProgress) {
+		const std::wstring pathW(path.begin(), path.end());
+		MESSAGE("Main", "loadScene", L"Loaded scene from '" << pathW << L"'");
+	}
 	return true;
 }
 

@@ -7,27 +7,28 @@
 #include "Device.h"
 #include "DeviceContext.h"
 #include "EngineUtilities/Utilities/LayoutBuilder.h"
+#include <cmath>
 
 
 HRESULT
-Skybox::init(Device& device, DeviceContext* deviceContext, Texture& cubemap) {
+Skybox::init(Device& device, DeviceContext* deviceContext, Texture& panorama) {
 	destroy();
 	if (!device.m_device || !deviceContext || !deviceContext->m_deviceContext) {
 		return E_POINTER;
 	}
-	if (!cubemap.m_textureFromImg) {
-		ERROR("Skybox", "init", "Cubemap SRV is null.");
+	if (!panorama.m_textureFromImg) {
+		ERROR("Skybox", "init", "Panoramic skybox SRV is null.");
 		return E_INVALIDARG;
 	}
 	auto failInit = [&](HRESULT failure) -> HRESULT {
 		destroy();
 		return failure;
 	};
-	// Cargar el cubemap
-	m_skyboxTexture = cubemap;
+	// Retain the panoramic texture. Texture copy semantics AddRef the COM resources.
+	m_skyboxTexture = panorama;
 
-	// 1) Geometría (cubo)
-	 // Cubo unitario centrado en origen. (tamaño no importa si quitas traslación)
+	// 1) Geometrï¿½a (cubo)
+	 // Cubo unitario centrado en origen. (tamaï¿½o no importa si quitas traslaciï¿½n)
 	const SkyboxVertex vertices[] = {
 			{-1,-1,-1}, {-1,+1,-1}, {+1,+1,-1}, {+1,-1,-1}, // back
 			{-1,-1,+1}, {-1,+1,+1}, {+1,+1,+1}, {+1,-1,+1}, // front
@@ -100,7 +101,7 @@ Skybox::init(Device& device, DeviceContext* deviceContext, Texture& cubemap) {
 	}
 
 	// Init Rasterizer
-	hr = m_rasterizerState.init(device, D3D11_FILL_SOLID, D3D11_CULL_FRONT, false, true);
+	hr = m_rasterizerState.init(device, D3D11_FILL_SOLID, D3D11_CULL_NONE, false, true);
 	if (FAILED(hr)) {
 		ERROR("Skybox", "init", "Failed to create new RasterizerState");
 		return failInit(hr);
@@ -118,38 +119,62 @@ Skybox::init(Device& device, DeviceContext* deviceContext, Texture& cubemap) {
 	return S_OK;
 }
 
+
+void Skybox::setTexture(Texture& panorama) {
+	if (!panorama.m_textureFromImg) return;
+	m_skyboxTexture = panorama;
+}
+
+void Skybox::setIntensity(float intensity) {
+	m_intensity = (std::max)(0.0f, intensity);
+}
+
+void Skybox::setRotationDegrees(float degrees) {
+	if (!std::isfinite(degrees)) return;
+	m_rotationDegrees = degrees;
+}
+
+void Skybox::setTint(float r, float g, float b) {
+	m_tint = XMFLOAT3(
+		(std::max)(0.0f, r),
+		(std::max)(0.0f, g),
+		(std::max)(0.0f, b));
+}
+
 void Skybox::update(DeviceContext& deviceContext, Camera& camera) {
-	// 2) View sin traslación + VP (SOLO una transpuesta al final)
+	// 2) View sin traslaciï¿½n + VP (SOLO una transpuesta al final)
 	XMMATRIX viewNoT = camera.GetViewNoTranslation();
 	XMMATRIX vp = viewNoT * camera.getProj();
 	CBSkybox cb{};
 	cb.mviewProj = XMMatrixTranspose(vp);
+	cb.skyParams = XMFLOAT4(XMConvertToRadians(m_rotationDegrees), m_intensity, 0.0f, 0.0f);
+	cb.tint = XMFLOAT4(m_tint.x, m_tint.y, m_tint.z, 1.0f);
 	m_constantBuffer.update(deviceContext, nullptr, 0, nullptr, &cb, 0, 0);
 }
 
 void
 Skybox::render(DeviceContext& deviceContext) {
-	// Guard: si no se inicializó bien, no intentes renderizar
+	// Guard: si no se inicializï¿½ bien, no intentes renderizar
 	if (!m_cubeModel || !m_skyboxTexture.m_textureFromImg) return;
 
 	// 1) States del skybox
 	m_rasterizerState.render(deviceContext);
 	m_depthStencilState.render(deviceContext, 0, false);
 
-	m_constantBuffer.render(deviceContext, 0, 1);
+	m_constantBuffer.render(deviceContext, 0, 1, true); // b0 is used by both VS and PS.
 
 	// 3) Shader + sampler (slot 10)
 	m_shaderProgram.render(deviceContext);
 	m_samplerState.render(deviceContext, 10, 1);
 
-	// 4) IMPORTANTÍSIMO: bindea cubemap ANTES del draw (slot 10)
+	// 4) IMPORTANTï¿½SIMO: bindea cubemap ANTES del draw (slot 10)
 	m_skyboxTexture.render(deviceContext, 10, 1);
 
 	// 5) Asegura IA (topology + VB/IB) antes del DrawIndexed
 	m_skybox->renderForSkybox(deviceContext);
 
 	ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
-	// Unbind cubemap (t10) and clear t0 to avoid SRV hazards with later passes.
+	// Unbind panorama (t10) and clear t0 to avoid SRV hazards with later passes.
 	deviceContext.PSSetShaderResources(10, 1, nullSRV);
 	deviceContext.PSSetShaderResources(0, 1, nullSRV);
 }

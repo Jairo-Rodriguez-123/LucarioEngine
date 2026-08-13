@@ -151,6 +151,13 @@ private:
 		std::string sourcePath;
 	};
 
+	struct SceneHistorySnapshot {
+		std::string snapshotPath;
+		std::string scenePath;
+		std::string label;
+		int selectedActorIndex = -1;
+	};
+
 	EU::TSharedPointer<Actor> createLightActor(const std::string& name = std::string());
 	bool importOBJFromDialog();
 	bool importOBJModel(const std::string& path);
@@ -159,6 +166,10 @@ private:
 	const ImportedMeshAsset* findImportedMeshAsset(const Actor* actor) const;
 	void handlePendingMaterialTextureEdit();
 	void handlePendingAssetBrowserAction();
+	void handlePendingSkyboxEdit();
+	bool loadPanoramicSkybox(const std::string& path);
+	bool copySkyboxTextureIntoProject(const std::string& sourcePath, std::string& outPortablePath);
+	void resetSkyboxToDefault();
 	void updateAssetBrowserCatalog(float deltaTime);
 	bool refreshAssetBrowserCatalog(bool force = false);
 	bool applyMaterialTextureOverride(const EU::TSharedPointer<Actor>& actor, size_t materialSlot, MaterialTextureChannel channel, const std::string& path);
@@ -181,6 +192,20 @@ private:
 	void removeActorOwnedResources(const Actor* actor);
 	void copyActorEditableState(const EU::TSharedPointer<Actor>& source, const EU::TSharedPointer<Actor>& destination);
 	bool isValidSceneFileHeader(const std::string& path) const;
+
+	// Historial real del editor. Cada estado confirmado se serializa a un snapshot
+	// temporal reutilizando el formato WVSCENE, lo que permite deshacer tambien
+	// actores importados, materiales y eliminaciones sin duplicar la serializacion.
+	void resetSceneHistory(const std::string& label = "Initial Scene");
+	void commitSceneHistory(const std::string& label);
+	bool undoSceneHistory();
+	bool redoSceneHistory();
+	bool restoreSceneHistorySnapshot(size_t historyIndex);
+	bool captureSceneHistorySnapshot(const std::string& label, SceneHistorySnapshot& outSnapshot);
+	void cleanupSceneHistory();
+	void trimSceneHistory();
+	bool canUndoSceneHistory() const;
+	bool canRedoSceneHistory() const;
 
 	static LRESULT CALLBACK
 		WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -252,11 +277,18 @@ private:
 	GUI																m_gui;
 	bool m_guiInitialized = false;
 	std::string m_currentScenePath;
+	std::vector<SceneHistorySnapshot> m_sceneHistory;
+	size_t m_sceneHistoryCursor = 0;
+	unsigned long long m_sceneHistorySequence = 0;
+	std::string m_sceneHistoryDirectory;
+	bool m_historyCaptureInProgress = false;
+	bool m_historyRestoreInProgress = false;
 	EU::Vector3 m_cameraPos;
 
 	Skybox m_skybox;
-	Texture															m_skyboxTex;
+	Texture m_skyboxTex;
 	bool m_skyboxReady = false;
+	std::string m_skyboxTexturePath;
 	Texture m_lightIconTexture;
 	RasterizerState m_defaultRasterizer;
 	DepthStencilState m_defaultDepthStencil;

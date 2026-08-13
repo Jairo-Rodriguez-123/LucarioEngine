@@ -73,6 +73,15 @@ public:
 	void
 		setDeferredDebugViewMode(int mode) override { m_deferredDebugViewMode = mode; }
 
+	void setPostProcessEnabled(bool enabled) { m_postProcessData.PostProcessEnabled = enabled ? 1 : 0; }
+	void setBloomEnabled(bool enabled) { m_postProcessData.BloomEnabled = enabled ? 1 : 0; }
+	void setTonemappingEnabled(bool enabled) { m_postProcessData.TonemappingEnabled = enabled ? 1 : 0; }
+	void setFXAAEnabled(bool enabled) { m_postProcessData.FXAAEnabled = enabled ? 1 : 0; }
+	void setBloomThreshold(float value) { m_postProcessData.BloomThreshold = value; }
+	void setBloomIntensity(float value) { m_postProcessData.BloomIntensity = value; }
+	void setExposure(float value) { m_postProcessData.Exposure = value; }
+	void setFXAAStrength(float value) { m_postProcessData.FXAAStrength = value; }
+
 	const char*
 		getDebugName() const override { return "DeferredRenderer"; }
 
@@ -87,6 +96,8 @@ private:
 	void renderGeometryPass(DeviceContext& deviceContext);
 	void renderGeometryObject(DeviceContext& deviceContext, const RenderObject& object);
 	void renderLightingPass(DeviceContext& deviceContext);
+	void renderPostProcessStack(DeviceContext& deviceContext, ID3D11RenderTargetView* finalRenderTarget);
+	void drawPostProcessStage(DeviceContext& deviceContext, ShaderProgram& shader, ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target);
 	void renderSkyboxPass(DeviceContext& deviceContext, RenderScene& scene);
 	void renderTransparentPass(DeviceContext& deviceContext);
 	void renderForwardObject(DeviceContext& deviceContext, const RenderObject& object, RenderPassType passType);
@@ -102,6 +113,8 @@ private:
 		Texture& srv,
 		RenderTargetView& rtv);
 	HRESULT createLightingResources(Device& device);
+	HRESULT createPostProcessResources(Device& device);
+	HRESULT createPostProcessTarget(Device& device, unsigned int width, unsigned int height);
 	HRESULT createFullScreenQuad(Device& device);
 	HRESULT createBlendStates(Device& device);
 	ID3D11BlendState* resolveBlendState(const Material* material) const;
@@ -111,6 +124,7 @@ private:
 	Buffer m_perObjectBuffer;
 	Buffer m_perMaterialBuffer;
 	Buffer m_lightingDebugBuffer;
+	Buffer m_postProcessBuffer;
 	Buffer m_fullscreenVertexBuffer;
 	Buffer m_fullscreenIndexBuffer;
 
@@ -133,6 +147,9 @@ private:
 
 	ShaderProgram m_gBufferShader;
 	ShaderProgram m_deferredLightingShader;
+	ShaderProgram m_bloomShader;
+	ShaderProgram m_tonemapShader;
+	ShaderProgram m_fxaaShader;
 	SamplerState m_lightingSampler;
 	RasterizerState m_fullscreenRasterizer;
 
@@ -152,6 +169,17 @@ private:
 	Texture m_gBufferEmissiveAlphaSRV;
 	RenderTargetView m_gBufferEmissiveAlphaRTV;
 
+	// HDR scene target used as the input of the deferred post-process stack.
+	Texture m_hdrSceneTexture;
+	Texture m_hdrSceneSRV;
+	RenderTargetView m_hdrSceneRTV;
+	Texture m_postPingTexture;
+	Texture m_postPingSRV;
+	RenderTargetView m_postPingRTV;
+	Texture m_postPongTexture;
+	Texture m_postPongSRV;
+	RenderTargetView m_postPongRTV;
+
 	EditorViewportPass m_preShadowDebugPass;
 	bool m_applyShadows = true;
 	bool m_hasShadowCastingLight = false;
@@ -169,6 +197,20 @@ private:
 	} m_lightingDebugData{};
 	bool m_shadowFactorDebugEnabled = false;
 	int m_deferredDebugViewMode = 0;
+
+	struct PostProcessData {
+		XMFLOAT2 InverseResolution = XMFLOAT2(1.0f / 1280.0f, 1.0f / 720.0f);
+		float Exposure = 1.0f;
+		float BloomThreshold = 0.85f;
+		float BloomIntensity = 0.65f;
+		float FXAAStrength = 1.0f;
+		int BloomEnabled = 1;
+		int TonemappingEnabled = 1;
+		int FXAAEnabled = 1;
+		int PostProcessEnabled = 1;
+		float Gamma = 1.0f;
+		float Padding0 = 0.0f;
+	} m_postProcessData{};
 
 	std::vector<const RenderObject*> m_opaqueQueue;
 	std::vector<const RenderObject*> m_transparentQueue;

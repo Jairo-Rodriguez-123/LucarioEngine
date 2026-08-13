@@ -123,6 +123,10 @@ struct CBNeverChanges
 struct CBSkybox
 {
   XMMATRIX mviewProj;
+  // x = panorama rotation in radians, y = intensity. z/w reserved.
+  XMFLOAT4 skyParams;
+  // RGB tint applied to the panorama; alpha reserved.
+  XMFLOAT4 tint;
 };
 
 struct CBChangeOnResize
